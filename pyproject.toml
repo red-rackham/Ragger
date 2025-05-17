@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragger"
+version = "0.1.0"
+description = "RAG-based interactive query application"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "AGPL-3.0-or-later"
+authors = [
+    {name = "Jakob Bolliger", email = "ragger@jpost.ch"},  # Update with your info
+]
+dependencies = [
+    "langchain-community",
+    "langchain-huggingface",
+    "langchain-ollama",
+    "langchain",
+    "prompt_toolkit",
+    "faiss-cpu",  # Assuming you're using FAISS for vector storage
+]
+
+[project.scripts]
+ragger = "ragger.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["ragger", "ragger.core", "ragger.interfaces", "ragger.utils", "ragger.ui"]
