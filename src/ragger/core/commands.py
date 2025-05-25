@@ -5,7 +5,7 @@ This module handles command recognition, parsing, and execution
 independent of the user interface.
 """
 import re
-from typing import Optional, Tuple, Dict, Any, List, Union
+from typing import Optional, Tuple, Dict, Any, List
 
 
 class Command:

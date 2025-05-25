@@ -1,10 +1,17 @@
+# Core dependencies
 langchain>=0.1.0
 langchain-community>=0.0.15
-langchain-core>=0.1.10
-langchain-text-splitters>=0.0.1
-faiss-cpu>=1.7.4
-sentence-transformers>=2.2.2
 langchain-huggingface>=0.0.2
 langchain-ollama>=0.0.1
+langchain_text_splitters>=0.3.8
+
+# Vector storage - GPU accelerated by default
+faiss-gpu>=1.7.1
+# For CPU-only environments (uncomment and comment faiss-gpu):
+# faiss-cpu>=1.7.1
+
+# NumPy compatibility constraint for FAISS
+numpy<2
+
+# UI framework
 prompt_toolkit>=3.0.38
-pyperclip>=1.8.2

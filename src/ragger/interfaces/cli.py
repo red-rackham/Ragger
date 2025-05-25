@@ -13,24 +13,27 @@ This module provides a Command Line Interface (CLI) to the Ragger application,
 connecting the core RAG functionality with a terminal-based UI.
 """
 import sys
-from typing import Dict, Any, Optional
+import time
+import threading
 
-from ragger.ui.terminal import RaggerUI, InputMode
+from ragger.ui.terminal import RaggerUI
 from ragger.ui.terminal.text_utils import get_wrapped_text_in_box
 from ragger.ui.resources import Emojis, BOXED_BANNER
 from ragger.ui.terminal import format_chunk_display
+from ragger.utils.logging_config import setup_logging, get_logger
 
 
 class CliInterface:
     """CLI interface for the Ragger application."""
     
-    def __init__(self, rag_service, command_manager, debug_mode=False):
+    def __init__(self, rag_service, command_manager, debug_mode=False, verbose=False):
         """Initialize the CLI interface.
         
         Args:
             rag_service: RAG service to use
             command_manager: Command manager to use
             debug_mode: Enable debug mode for troubleshooting UI issues
+            verbose: Enable verbose logging
         """
         self.rag_service = rag_service
         self.command_manager = command_manager
@@ -40,6 +43,11 @@ class CliInterface:
         self.full_chunks = False
         self.auto_save = False
         self.debug_mode = debug_mode
+        self.verbose = verbose
+        
+        # Setup centralized logging
+        setup_logging(verbose)
+        self.logger = get_logger(__name__)
         
         # Create UI instance
         self.ui = RaggerUI(
@@ -50,13 +58,18 @@ class CliInterface:
     
     def _handle_query(self, query: str):
         """Handle a query from the UI."""
+        start_time = time.time()
+        self.logger.info(f"Starting query handling: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+        
         if not query.strip():
+            self.logger.debug("Empty query received, returning early")
             return
             
         # Format and display the user prompt in a box
         box_width = self.ui.app.output.get_size().columns - 2
         formatted_text = f"\n{Emojis.USER} Prompt:"
         self.ui.add_response(formatted_text, "prompt_header") 
+        self.logger.debug("Added prompt header to UI")
         
         # Create a boxed prompt and add it as a response
         boxed_text = get_wrapped_text_in_box(
@@ -66,25 +79,41 @@ class CliInterface:
             border_style="solid"
         )
         self.ui.add_response(boxed_text, "prompt")
+        self.logger.debug("Added boxed prompt to UI")
             
-        # Display search message
+        # Phase 1: Retrieve chunks and show them immediately
         self.ui.add_response(f"\n{Emojis.SEARCH} Searching knowledge base...", "info")
+        self.logger.info("Phase 1: Starting chunk retrieval")
         
-        # Query the RAG service
-        result = self.rag_service.query(query)
+        # Retrieve chunks first
+        retrieval_start = time.time()
+        retrieval_result = self.rag_service.search_only(query)
+        retrieval_time = time.time() - retrieval_start
+        self.logger.info(f"Chunk retrieval completed in {retrieval_time:.2f}s")
         
-        # Update chunk counts
-        if result.get('retrieved_docs'):
+        if not retrieval_result.get('success', False):
+            error_msg = retrieval_result.get('error', 'Unknown error')
+            self.logger.error(f"Retrieval failed: {error_msg}")
+            self.ui.add_response(f"\n{Emojis.ERROR} Error during search: {error_msg}", "error")
+            return
+        
+        retrieved_docs = retrieval_result.get('retrieved_docs', [])
+        self.logger.info(f"Retrieved {len(retrieved_docs)} chunks")
+        
+        # Update chunk counts and show retrieved chunks immediately
+        if retrieved_docs:
             # Store retrieved chunks in history for later access by expand/add commands
-            self.rag_service.retrieved_chunks_history.append(list(result.get('retrieved_docs', [])))
+            self.rag_service.retrieved_chunks_history.append(list(retrieved_docs))
             
             self.ui.set_chunk_counts(
                 len(getattr(self.rag_service, 'custom_chunks', [])),
-                len(result.get('retrieved_docs', []))
+                len(retrieved_docs)
             )
+            self.logger.debug(f"Updated chunk counts in UI")
             
             # Display retrieved chunks if not hidden
-            if not self.hide_chunks and result.get('retrieved_docs'):
+            if not self.hide_chunks:
+                self.logger.debug("Formatting and displaying chunks")
                 # Format retrieved chunks
                 chunk_text = f"\n{Emojis.CHUNKS} Retrieved chunks:"
                 self.ui.add_response(chunk_text, "chunks_header")
@@ -93,7 +122,7 @@ class CliInterface:
                 all_chunks_text = []
                 
                 # Add each chunk with formatting
-                for i, doc in enumerate(result.get('retrieved_docs', []), 1):
+                for i, doc in enumerate(retrieved_docs, 1):
                     if self.full_chunks:
                         # Full chunk details
                         chunk_info = format_chunk_display(doc, i, True, box_width-2)
@@ -104,7 +133,7 @@ class CliInterface:
                     all_chunks_text.append(chunk_info)
                     
                     # Add separator between chunks if not the last one
-                    if i < len(result.get('retrieved_docs', [])):
+                    if i < len(retrieved_docs):
                         all_chunks_text.append("-" * (box_width - 10))
                 
                 # Create a boxed representation of all chunks
@@ -117,37 +146,52 @@ class CliInterface:
                 
                 # Add the formatted chunks
                 self.ui.add_response(boxed_chunks, "chunk")
-        
-        # Display the response in a box
-        if result.get('success', False):
-            # Format the model name nicely
-            model_name = self.rag_service.llm_model.capitalize()
-            response_header = f"\n{Emojis.ROBOT} {model_name}:"
-            self.ui.add_response(response_header, "response_header")
-            
-            # Box the response
-            boxed_response = get_wrapped_text_in_box(
-                result['answer'],
-                box_width,
-                "",
-                border_style="solid"
-            )
-            
-            # Add the boxed response
-            self.ui.add_response(boxed_response, "response")
+                chunks_display_time = time.time() - retrieval_start
+                self.logger.info(f"Chunks displayed after {chunks_display_time:.2f}s from retrieval start")
+            else:
+                self.logger.debug("Chunks hidden by user setting")
         else:
-            # Handle error case
-            self.ui.add_response(f"\n{Emojis.ERROR} Error: {result.get('error', 'Unknown error')}", "error")
+            self.logger.warning("No chunks were retrieved")
+            self.ui.add_response(f"\n{Emojis.WARNING} No chunks were retrieved.", "warning")
+        
+        phase1_time = time.time() - start_time
+        self.logger.info(f"Phase 1 (retrieval + display) completed in {phase1_time:.2f}s")
+        
+        # Phase 2: Generate LLM response (if LLM model available)
+        if not self.rag_service.llm_model:
+            self.logger.info("No LLM model available, showing search-only messages")
+            self.ui.add_response(f"\n{Emojis.WARNING} No LLM model loaded - search mode only!", "warning")
+            self.ui.add_response(f"\n{Emojis.INFO} Use search commands instead:", "info")
+            self.ui.add_response(f"   {Emojis.BULLET} /search <your query>  - Search the knowledge base", "info")
+            self.ui.add_response(f"   {Emojis.BULLET} /chunks <number>     - Set number of results", "info")
+            self.ui.add_response(f"   {Emojis.BULLET} /expand <chunk_num>  - View full chunk content", "info")
+            self.ui.add_response(f"\n{Emojis.TAB} Switch to search mode with Tab key, then try your query!", "info")
+            total_time = time.time() - start_time
+            self.logger.info(f"Query handling completed (search-only) in {total_time:.2f}s")
+            return
+        
+        # Show generating message
+        self.logger.info("Phase 2: Starting LLM generation")
+        self.ui.add_response(f"\n{Emojis.ROBOT} Generating response...", "info")
+        
+        # Run LLM generation in a separate thread to avoid blocking UI
+        def generate_llm_response():
+            generation_start = time.time()
+            generation_result = self.rag_service.generate_response(query, retrieved_docs)
+            generation_time = time.time() - generation_start
+            self.logger.info(f"LLM generation completed in {generation_time:.2f}s")
             
-            # Display error response if available
-            if result.get('answer'):
+            # Display the response in a box
+            if generation_result.get('success', False):
+                self.logger.debug("Formatting and displaying LLM response")
+                # Format the model name nicely
                 model_name = self.rag_service.llm_model.capitalize()
                 response_header = f"\n{Emojis.ROBOT} {model_name}:"
                 self.ui.add_response(response_header, "response_header")
                 
-                # Box the error response
+                # Box the response
                 boxed_response = get_wrapped_text_in_box(
-                    result['answer'],
+                    generation_result['answer'],
                     box_width,
                     "",
                     border_style="solid"
@@ -155,10 +199,20 @@ class CliInterface:
                 
                 # Add the boxed response
                 self.ui.add_response(boxed_response, "response")
-                
-        # Display warning if no chunks were retrieved
-        if not result.get('retrieved_docs'):
-            self.ui.add_response(f"\n{Emojis.WARNING} No chunks were successfully retrieved.", "warning")
+                self.logger.debug("LLM response displayed")
+            else:
+                # Handle error case
+                error_msg = generation_result.get('error', 'Unknown error')
+                self.logger.error(f"LLM generation failed: {error_msg}")
+                self.ui.add_response(f"\n{Emojis.ERROR} Error generating response: {error_msg}", "error")
+            
+            total_time = time.time() - start_time
+            self.logger.info(f"Complete query handling finished in {total_time:.2f}s "
+                             f"(retrieval: {retrieval_time:.2f}s, generation: {generation_time:.2f}s)")
+        
+        # Start the LLM generation in a background thread
+        generation_thread = threading.Thread(target=generate_llm_response, daemon=True)
+        generation_thread.start()
     
     def _handle_command(self, cmd_text: str):
         """Handle a command from the UI."""
@@ -177,7 +231,8 @@ class CliInterface:
                 if result['success']:
                     self.ui.add_response(f"Conversation history saved to {result['filepath']}", "info")
                 else:
-                    self.ui.add_response(f"Error saving conversation history: {result.get('error', 'Unknown error')}", "error")
+                    self.ui.add_response(f"Error saving conversation history: "
+                                         f"{result.get('error', 'Unknown error')}", "error")
             
             self.ui.add_response("Goodbye!", "info")
             # Force update the display to show the goodbye message
@@ -276,7 +331,8 @@ class CliInterface:
                     if result['success']:
                         self.ui.add_response(f"Conversation history saved to {result['filepath']}", "info")
                     else:
-                        self.ui.add_response(f"Error saving conversation history: {result.get('error', 'Unknown error')}", "error")
+                        self.ui.add_response(f"Error saving conversation history: "
+                                             f"{result.get('error', 'Unknown error')}", "error")
                         
             case "AddCommand":
                 # Add a chunk to custom chunks
@@ -297,12 +353,14 @@ class CliInterface:
                         break
                         
                 if not recent_chunks:
-                    self.ui.add_response(f"\n{Emojis.ERROR} No chunks available from previous queries.", "error")
+                    self.ui.add_response(f"\n{Emojis.ERROR} No chunks available from "
+                                         f"previous queries.", "error")
                     return
                     
                 # Check if the chunk number is valid
                 if command.chunk_num < 1 or command.chunk_num > len(recent_chunks):
-                    self.ui.add_response(f"\n{Emojis.ERROR} Invalid chunk number. Available chunks: 1-{len(recent_chunks)}", "error")
+                    self.ui.add_response(f"\n{Emojis.ERROR} Invalid chunk number. "
+                                         f"Available chunks: 1-{len(recent_chunks)}", "error")
                     return
                     
                 # Get the chunk directly
@@ -316,10 +374,13 @@ class CliInterface:
                             preview += "..."
                         
                         # Format success message with more details
-                        self.ui.add_response(f"\n{Emojis.CHECK} Added chunk #{command.chunk_num} to your custom chunks list!", "info")
-                        self.ui.add_response(f"You now have {add_result.get('chunks_count', 1)} chunks in your personal archive.", "info")
+                        self.ui.add_response(f"\n{Emojis.CHECK} Added chunk #{command.chunk_num} to your custom "
+                                             f"chunks list!", "info")
+                        self.ui.add_response(f"You now have {add_result.get('chunks_count', 1)} chunks in your "
+                                             f"personal archive.", "info")
                         self.ui.add_response(f"\nPreview: \"{preview}\"", "info")
-                        self.ui.add_response(f"\nUse 'ap {add_result.get('chunk_num', command.chunk_num)}' to add this chunk to your prompt when needed.", "info")
+                        self.ui.add_response(f"\nUse 'ap {add_result.get('chunk_num', command.chunk_num)}' to add "
+                                             f"this chunk to your prompt when needed.", "info")
                         self.ui.add_response("Use 'lc' to list all your custom chunks.", "info")
                         
                         # Update chunk counts
@@ -328,7 +389,8 @@ class CliInterface:
                             self.ui.state.retrieved_chunks_count
                         )
                     else:
-                        self.ui.add_response(f"\n{Emojis.ERROR} Error adding chunk: {add_result.get('error', 'Unknown error')}", "error")
+                        self.ui.add_response(f"\n{Emojis.ERROR} Error adding chunk: "
+                                             f"{add_result.get('error', 'Unknown error')}", "error")
                 else:
                     self.ui.add_response(f"\n{Emojis.ERROR} Error: Could not retrieve chunk for adding.", "error")
                     
@@ -361,7 +423,8 @@ class CliInterface:
                     # Add the boxed content
                     self.ui.add_response(boxed_text, "chunk")
                 else:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error expanding chunk: {result.get('error', 'Unknown error')}", "error")
+                    self.ui.add_response(f"\n{Emojis.ERROR} Error expanding chunk: "
+                                         f"{result.get('error', 'Unknown error')}", "error")
                     
             case "ListChunksCommand":
                 # List custom chunks
@@ -408,7 +471,8 @@ class CliInterface:
                     
                 result = self.rag_service.expand_custom_chunk(command.chunk_num, command.context_size)
                 if result['success']:
-                    self.ui.add_response(f"\n{Emojis.INFO} Added custom chunk #{command.chunk_num} to prompt context:", "info")
+                    self.ui.add_response(f"\n{Emojis.INFO} Added custom chunk #{command.chunk_num} to prompt "
+                                         f"context:", "info")
                     
                     # Format content in a dashed box
                     box_width = self.ui.app.output.get_size().columns - 2
@@ -421,9 +485,11 @@ class CliInterface:
                     
                     # Add the boxed content
                     self.ui.add_response(boxed_text, "chunk")
-                    self.ui.add_response(f"\n{Emojis.INFO} Your next query will include this context.", "info")
+                    self.ui.add_response(f"\n{Emojis.INFO} Your next query will "
+                                         f"include this context.", "info")
                 else:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error: {result.get('error', 'Unknown error')}", "error")
+                    self.ui.add_response(f"\n{Emojis.ERROR} Error: "
+                                         f"{result.get('error', 'Unknown error')}", "error")
                     
             case "SearchCommand":
                 # Handle search command
@@ -433,8 +499,8 @@ class CliInterface:
                 
                 self.ui.add_response(f"\n{Emojis.SEARCH} Searching for: {command.query}", "info")
                 
-                # Use the RAG service to perform the search
-                result = self.rag_service.query(command.query, use_history=False)
+                # Use the RAG service to perform search-only (no LLM generation)
+                result = self.rag_service.search_only(command.query)
                 
                 # Display results
                 if result.get('retrieved_docs'):
@@ -489,7 +555,8 @@ class CliInterface:
             case "SetChunksCommand":
                 # Set number of chunks to retrieve
                 if command.num_chunks is None:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Please specify the number of chunks to retrieve.", "error")
+                    self.ui.add_response(f"\n{Emojis.ERROR} "
+                                         f"Please specify the number of chunks to retrieve.", "error")
                     return
                     
                 # Call the RAG service to set the number of chunks
@@ -499,18 +566,23 @@ class CliInterface:
                     # Show success message with previous and new values
                     previous = result['previous_value']
                     current = result['current_value']
-                    self.ui.add_response(f"\n{Emojis.CHECK} Number of chunks to retrieve changed from {previous} to {current}.", "info")
-                    self.ui.add_response(f"Use the '-sc' or '--set-chunks' command-line option to set this value when starting the application.", "info")
+                    self.ui.add_response(f"\n{Emojis.CHECK} Number of chunks to retrieve changed from {previous} "
+                                         f"to {current}.", "info")
+                    self.ui.add_response(f"Use the '-sc' or '--set-chunks' command-line option to set this value "
+                                         f"when starting the application.", "info")
                 else:
                     # Show error message
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error: {result.get('error', 'Unknown error')}", "error")
+                    self.ui.add_response(f"\n{Emojis.ERROR} Error: "
+                                         f"{result.get('error', 'Unknown error')}", "error")
                     
             case "GetChunksCommand":
                 # Display current chunks setting
                 num_chunks = self.rag_service.num_chunks
-                self.ui.add_response(f"\n{Emojis.CHUNKS} Current number of chunks to retrieve: {num_chunks}", "info")
+                self.ui.add_response(f"\n{Emojis.CHUNKS} Current number of chunks to retrieve: "
+                                     f"{num_chunks}", "info")
                 self.ui.add_response(f"Use 'sc <number>' to change this setting.", "info")
-                self.ui.add_response(f"Use the '-sc' or '--set-chunks' command-line option to set this value when starting the application.", "info")
+                self.ui.add_response(f"Use the '-sc' or '--set-chunks' command-line option to set this value when "
+                                     f"starting the application.", "info")
                 
             case "PromptCommand":
                 # Handle prompt command
@@ -556,6 +628,9 @@ class CliInterface:
             if self.rag_service.vectorstore:
                 self.ui.add_response(f"\n{Emojis.CHECK} Vector database loaded successfully from:"
                                      f" {self.rag_service.db_path}", "info")
+                if hasattr(self.rag_service, 'db_info') and self.rag_service.db_info:
+                    self.ui.add_response(f"\n{Emojis.INFO} Auto-detected embedding model: "
+                                         f"{self.rag_service.embedding_model}", "info")
             else:
                 self.ui.add_response("Error loading vector database.", "error")
                 self.ui.add_response("Please check the path and try again.", "info")
@@ -570,8 +645,10 @@ class CliInterface:
             
         # Display success and model info
         self.ui.add_response(f"\n{Emojis.ROBOT} Using LLM model: {self.rag_service.llm_model}", "info")
-        self.ui.add_response(f"\n{Emojis.CHUNKS} Number of chunks to retrieve: {self.rag_service.num_chunks}", "info")
-        self.ui.add_response(f"\n{Emojis.INFO} Note: The first query may take longer as the model needs to load.", "info")
+        self.ui.add_response(f"\n{Emojis.CHUNKS} Number of chunks to retrieve: "
+                             f"{self.rag_service.num_chunks}", "info")
+        self.ui.add_response(f"\n{Emojis.INFO} Note: The first query may take longer as the "
+                             f"model needs to load.", "info")
 
         # Run the UI
         try:

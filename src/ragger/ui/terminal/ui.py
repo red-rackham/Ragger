@@ -266,18 +266,9 @@ class RaggerUI:
                     # If at the newest entry, restore the saved content
                     self.input_buffer.text = self.state.get_current_buffer_content()
 
-        # Get a large viewport size to ensure we can scroll through all content
+        # Scroll step sizes
         self.scroll_step_small = 5
         self.scroll_step_large = 40
-
-        # Add Ctrl+Arrow key bindings
-        # @self.kb.add('c-up')
-        # def _(event):
-        #     pass
-        #
-        # @self.kb.add('c-down')
-        # def _(event):
-        #     pass
 
         @self.kb.add('s-up')
         def _(event):
@@ -530,8 +521,21 @@ class RaggerUI:
         self.state.add_to_output_history(text, category)
         self._update_output_buffer()
 
-        # Give the application a chance to update the UI layout
+        # Force immediate UI update to ensure chunks appear before LLM generation
         self.app.invalidate()
+        
+        # Force the output buffer to scroll to the end to show new content
+        if hasattr(self.output_window, 'content') and hasattr(self.output_window.content, 'buffer'):
+            # Move cursor to end of buffer to ensure new content is visible
+            buffer = self.output_window.content.buffer
+            buffer.cursor_position = len(buffer.text)
+            
+        # Schedule an immediate redraw by calling output processing
+        if hasattr(self.app, 'output') and hasattr(self.app.output, 'flush'):
+            try:
+                self.app.output.flush()
+            except:
+                pass
 
     def set_chunk_counts(self, custom_count: int, retrieved_count: int):
         """Set the chunk counts for the status bar."""

@@ -10,6 +10,7 @@ from langchain_ollama.llms import OllamaLLM
 from langchain.prompts import PromptTemplate
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from ragger.utils.logging_config import get_logger
 
 from ragger.config import (
     DEFAULT_EMBEDDING_MODEL,
@@ -23,7 +24,6 @@ from ragger.config import (
     SYSTEM_PROMPT_CONTEXT,
     SYSTEM_PROMPT_QUERY
 )
-from ragger.ui.resources import Emojis
 
 
 def load_vectorstore(db_path: str, embedding_model_name: str) -> FAISS:
@@ -91,8 +91,7 @@ def create_rag_chain(vectorstore: FAISS,
         template=template
     )
 
-    # Initialize the LLM with timeout
-    # print(f"\n{Emojis.INFO} Initializing LLM model: {llm_model_name} ({OLLAMA_BASE_URL})...")
+    # Initialize the LLM
     try:
         llm = OllamaLLM(
             model=llm_model_name,
@@ -102,7 +101,8 @@ def create_rag_chain(vectorstore: FAISS,
         )
 
     except Exception as e:
-        print(f"\n{Emojis.WARNING} Warning: Error initializing LLM model: {str(e)}")
+        logger = get_logger(__name__)
+        logger.error(f"Error initializing LLM model: {str(e)}")
         raise e
 
     # Create the question-answer chain

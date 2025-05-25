@@ -16,6 +16,7 @@ env/
 ENV/
 .venv/
 .env/
+/test_env/
 
 # Local development settings
 .python-version
@@ -35,4 +36,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-#
+# Logs
+logs/
+*.log

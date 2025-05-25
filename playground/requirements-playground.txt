@@ -1,0 +1,20 @@
+# Additional dependencies for playground utilities
+# Install with: pip install -r playground/requirements-playground.txt
+
+# Document processing and conversion
+docling>=2.31.0
+docling-core>=2.30.0
+docling-ibm-models>=3.4.0
+docling-parse>=4.0.0
+
+# LangChain components for RAG
+langchain-community
+langchain-text-splitters
+langchain-ollama
+
+# Vector store and embeddings
+faiss-cpu
+sentence-transformers
+
+# Additional utilities
+typing-extensions
