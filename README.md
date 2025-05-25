@@ -9,15 +9,18 @@ Ragger is a simple terminal-based interface for RAG (Retrieval-Augmented Generat
 ## Features
 
 - **RAG-powered search**: Query your documents and get LLM responses based on retrieved content
+- **Auto-detection**: Automatically detects embedding models from existing vector databases
+- **Search-only mode**: Use as a semantic search tool without requiring an LLM
 - **Chunk management**: Save and reuse relevant chunks of information
 - **Conversation history**: Keep track of your query sessions
-- **Terminal UI**: Simple command and prompt modes
+- **Terminal UI**: Simple command and prompt modes with helpful guidance
 
 ## Prerequisites
 
 - Python 3.12 or higher
-- [Ollama](https://ollama.ai) for local LLM inference
+- [Ollama](https://ollama.ai) for local LLM inference (optional for search-only mode)
 - A vector database containing your documents
+- GPU support recommended for large vector databases
 
 ## Installation
 
@@ -127,8 +130,8 @@ Searching is a core functionality of Ragger:
 
 | Option | Description |
 |--------|-------------|
-| `-e, --embedding-model` | HuggingFace embedding model to use |
-| `-l, --llm-model` | Ollama LLM model to use |
+| `-e, --embedding-model` | HuggingFace embedding model to use (auto-detected if available) |
+| `-l, --llm-model` | Ollama LLM model to use (optional for search-only mode) |
 | `-sc, --set-chunks` | Number of chunks to retrieve (default: 5) |
 | `-d, --hide-chunks` | Hide the retrieved text chunks |
 | `-f, --full-chunks` | Show full chunk content and all metadata |

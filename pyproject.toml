@@ -1,10 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=64.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ragger"
 version = "0.1.0"
+dynamic = []
 description = "RAG-based interactive query application"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -13,12 +14,18 @@ authors = [
     {name = "Jakob Bolliger", email = "ragger@jpost.ch"},  # Update with your info
 ]
 dependencies = [
-    "langchain-community",
-    "langchain-huggingface",
-    "langchain-ollama",
-    "langchain",
-    "prompt_toolkit",
-    "faiss-cpu",  # Assuming you're using FAISS for vector storage
+    "langchain>=0.1.0",
+    "langchain-community>=0.0.15", 
+    "langchain-huggingface>=0.0.2",
+    "langchain-ollama>=0.0.1",
+    "prompt_toolkit>=3.0.38",
+    "faiss-gpu>=1.7.1",
+    "numpy<2",
+]
+
+[project.optional-dependencies]
+playground = [
+    "docling>=2.0.0",
 ]
 
 [project.scripts]

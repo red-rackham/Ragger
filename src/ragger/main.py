@@ -25,8 +25,8 @@ def main():
     parser = argparse.ArgumentParser(description="Interactive query session with a vector database")
     parser.add_argument("db_path", nargs='?', default=str(DEFAULT_VECTORDB_DIR),
                         help=f"Path to the vector database (default: {DEFAULT_VECTORDB_DIR})")
-    parser.add_argument("-e", "--embedding-model", default=DEFAULT_EMBEDDING_MODEL,
-                        help=f"HuggingFace embedding model (default: {DEFAULT_EMBEDDING_MODEL})")
+    parser.add_argument("-e", "--embedding-model", default=None,
+                        help=f"HuggingFace embedding model (default: auto-detect from ragger.info, fallback: {DEFAULT_EMBEDDING_MODEL})")
     parser.add_argument("-l", "--llm-model", default=DEFAULT_LLM_MODEL,
                         help=f"Ollama LLM model to use (default: {DEFAULT_LLM_MODEL})")
     parser.add_argument("-sc", "--set-chunks", type=int, default=DEFAULT_NUM_CHUNKS,
@@ -39,6 +39,8 @@ def main():
                         help="Save conversation history to file when exiting")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug mode for troubleshooting scrolling and other UI issues")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable verbose logging for debugging")
 
     args = parser.parse_args()
 
@@ -57,7 +59,7 @@ def main():
         command_manager = CommandManager()
 
         # Create and run CLI interface
-        cli = CliInterface(rag_service, command_manager, debug_mode=args.debug)
+        cli = CliInterface(rag_service, command_manager, debug_mode=args.debug, verbose=args.verbose)
 
         # Run the interactive session
         cli.interactive_session(
