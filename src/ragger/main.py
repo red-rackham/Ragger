@@ -12,11 +12,15 @@ Ragger - Main entry point for the RAG-based interactive query application.
 import argparse
 import sys
 
-from ragger.config import DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL, DEFAULT_NUM_CHUNKS, DEFAULT_VECTORDB_DIR
-from ragger.ui.resources import Emojis
-from ragger.core.rag import RagService
+from ragger.config import (DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL,
+                           DEFAULT_NUM_CHUNKS, DEFAULT_VECTORDB_DIR)
 from ragger.core.commands import CommandManager
+from ragger.core.exceptions import (EmbeddingModelError, VectorStoreError,
+                                    VectorStoreLoadError,
+                                    VectorStoreNotFoundError)
+from ragger.core.rag import RagService
 from ragger.interfaces import CliInterface
+from ragger.ui.resources import Emojis, format_error_message
 
 
 def main():
@@ -41,8 +45,17 @@ def main():
                         help="Enable debug mode for troubleshooting scrolling and other UI issues")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose logging for debugging")
+    parser.add_argument("-i", "--ignore-custom", action="store_true",
+                        help="Always search vector database, ignore custom chunks")
+    parser.add_argument("--combine-chunks", action="store_true",
+                        help="Search vector database AND include custom chunks")
 
     args = parser.parse_args()
+
+    # Validate conflicting chunk behavior flags
+    if args.ignore_custom and args.combine_chunks:
+        print(format_error_message("Cannot use --ignore-custom and --combine-chunks together"))
+        sys.exit(1)
 
     print(f"\nInitializing Ragger - Copyright (c) 2025 Jakob Bolliger - AGPL License")
     print(f"{Emojis.WAITING} Loading vector database from {args.db_path}, please wait...")
@@ -53,7 +66,9 @@ def main():
             args.db_path,
             args.embedding_model,
             args.llm_model,
-            args.set_chunks
+            args.set_chunks,
+            ignore_custom=args.ignore_custom,
+            combine_chunks=args.combine_chunks
         )
 
         command_manager = CommandManager()
@@ -67,6 +82,41 @@ def main():
             full_chunks=args.full_chunks,
             auto_save=args.save
         )
+    except VectorStoreNotFoundError as e:
+        print(f"\n{Emojis.ERROR} Vector Database Not Found")
+        print(f"Could not find vector database at: {e.path}")
+        print(f"\nPlease ensure the path exists and contains a valid FAISS vector database.")
+        print(f"Expected files: index.faiss, index.pkl")
+        if args.verbose:
+            print(f"\nDetailed error: {str(e)}")
+        sys.exit(1)
+    except EmbeddingModelError as e:
+        print(f"\n{Emojis.ERROR} Embedding Model Error")
+        print(f"Failed to load embedding model: {e.model_name}")
+        print(f"\nThis could be due to:")
+        print(f"  • Network connectivity issues")
+        print(f"  • Invalid model name") 
+        print(f"  • Missing HuggingFace dependencies")
+        if args.verbose:
+            print(f"\nDetailed error: {str(e)}")
+        sys.exit(1)
+    except VectorStoreLoadError as e:
+        print(f"\n{Emojis.ERROR} Vector Database Load Error")
+        print(f"Failed to load vector database from: {e.path}")
+        print(f"Embedding model: {e.embedding_model}")
+        print(f"\nThis could be due to:")
+        print(f"  • Incompatible embedding model (database was created with different model)")
+        print(f"  • Corrupted database files")
+        print(f"  • Version compatibility issues")
+        if args.verbose:
+            print(f"\nDetailed error: {str(e)}")
+        sys.exit(1)
+    except VectorStoreError as e:
+        print(f"\n{Emojis.ERROR} Vector Database Error")
+        print(f"An error occurred with the vector database: {str(e)}")
+        if args.verbose and hasattr(e, '__cause__') and e.__cause__:
+            print(f"\nDetailed error: {str(e.__cause__)}")
+        sys.exit(1)
     except KeyboardInterrupt:
         # Try to save conversation history before exiting if auto-save is enabled
         if hasattr(args, 'save') and args.save and 'rag_service' in locals():

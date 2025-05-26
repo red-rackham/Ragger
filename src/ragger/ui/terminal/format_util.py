@@ -8,9 +8,7 @@ import shutil
 from pathlib import Path
 
 from ragger.ui.resources import Emojis
-
-
-# Function moved to terminal package
+from ragger.config import DEFAULT_CONTEXT_SIZE, TERMINAL_FALLBACK_WIDTH, TERMINAL_MIN_WIDTH
 
 
 def get_terminal_width() -> int:
@@ -18,9 +16,9 @@ def get_terminal_width() -> int:
     try:
         width = shutil.get_terminal_size().columns - 1
         # Ensure a minimum width to prevent formatting issues
-        return max(width, 60)  # Minimum width of 60 characters
+        return max(width, TERMINAL_MIN_WIDTH)  # Minimum width
     except Exception:
-        return 80  # fallback width
+        return TERMINAL_FALLBACK_WIDTH  # fallback width
 
 
 def get_chunk_header(doc, chunk_number: int) -> str:
@@ -169,7 +167,7 @@ def format_chunk_display(doc, chunk_number: int, full_chunks: bool, terminal_wid
     return chunk_text
 
 
-def expand_chunk_context(chunk, source_path, chunk_index, terminal_width, context_size=500):
+def expand_chunk_context(chunk, source_path, chunk_index, terminal_width, context_size=DEFAULT_CONTEXT_SIZE):
     """Expand a chunk to see more context from its source document."""
     try:
         # First check if the source file exists and is readable

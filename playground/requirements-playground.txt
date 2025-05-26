@@ -8,13 +8,13 @@ docling-ibm-models>=3.4.0
 docling-parse>=4.0.0
 
 # LangChain components for RAG
-langchain-community
-langchain-text-splitters
-langchain-ollama
+langchain-community>=0.0.15
+langchain-text-splitters>=0.3.8
+langchain-ollama>=0.0.1
 
 # Vector store and embeddings
-faiss-cpu
-sentence-transformers
+faiss-cpu>=1.7.1
+sentence-transformers>=2.2.2
 
 # Additional utilities
 typing-extensions

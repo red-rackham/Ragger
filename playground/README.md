@@ -2,6 +2,18 @@
 
 Utility scripts for document processing and vector database creation.
 
+## 📦 Installation
+
+The playground utilities require additional dependencies. Install them with:
+
+```bash
+# From the main ragger directory
+pip install -e .[playground]
+
+# OR for older pip versions:
+pip install -r playground/requirements-playground.txt
+```
+
 ## 📄 Document Processing
 
 - **pdf_to_accessible_markdown.py**: Creates accessible markdown by replacing images with text descriptions.

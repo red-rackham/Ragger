@@ -13,14 +13,17 @@ This module provides a Command Line Interface (CLI) to the Ragger application,
 connecting the core RAG functionality with a terminal-based UI.
 """
 import sys
-import time
 import threading
+import time
+from queue import Empty, Queue
+from typing import Any, Dict
 
-from ragger.ui.terminal import RaggerUI
+from ragger.ui.terminal import RaggerUI, format_chunk_display
+from ragger.utils.logging_config import get_logger, setup_logging
 from ragger.ui.terminal.text_utils import get_wrapped_text_in_box
-from ragger.ui.resources import Emojis, BOXED_BANNER
-from ragger.ui.terminal import format_chunk_display
-from ragger.utils.logging_config import setup_logging, get_logger
+from ragger.interfaces.command_handlers import CommandHandlerRegistry
+from ragger.config import LLM_RESULT_CHECK_INTERVAL, THREAD_SHUTDOWN_TIMEOUT
+from ragger.ui.resources import BOXED_BANNER, Emojis, format_error_message
 
 
 class CliInterface:
@@ -49,12 +52,83 @@ class CliInterface:
         setup_logging(verbose)
         self.logger = get_logger(__name__)
         
+        # Thread-safe communication
+        self._llm_result_queue = Queue()
+        self._active_llm_threads = set()
+        self._shutdown_event = threading.Event()
+        
+        # Command handler registry
+        self.command_registry = CommandHandlerRegistry()
+        
         # Create UI instance
         self.ui = RaggerUI(
             on_query=self._handle_query,
             on_command=self._handle_command,
             debug_mode=debug_mode  # Pass through debug mode setting
         )
+    
+    def _display_llm_result(self, result_data: Dict[str, Any], query: str, start_time: float, retrieval_time: float):
+        """Display LLM result in UI thread-safely.
+        
+        Args:
+            result_data: Result from LLM generation
+            query: Original query
+            start_time: Query start time
+            retrieval_time: Time spent on retrieval phase
+        """
+        box_width = self.ui.app.output.get_size().columns - 2
+        generation_time = result_data.get('generation_time', 0)
+        
+        if result_data.get('success', False):
+            self.logger.debug("Formatting and displaying LLM response")
+            # Format the model name nicely
+            model_name = self.rag_service.llm_model.capitalize()
+            response_header = f"\n{Emojis.ROBOT} {model_name}:"
+            self.ui.add_response(response_header, "response_header")
+            
+            # Box the response
+            boxed_response = get_wrapped_text_in_box(
+                result_data['answer'],
+                box_width,
+                "",
+                border_style="solid"
+            )
+            
+            # Add the boxed response
+            self.ui.add_response(boxed_response, "response")
+            self.logger.debug("LLM response displayed")
+        else:
+            # Handle error case
+            error_msg = result_data.get('error', 'Unknown error')
+            self.logger.error(f"LLM generation failed: {error_msg}")
+            self.ui.add_response(format_error_message(f"Failed to generate response: {error_msg}"), "error")
+        
+        total_time = time.time() - start_time
+        self.logger.info(f"Complete query handling finished in {total_time:.2f}s "
+                         f"(retrieval: {retrieval_time:.2f}s, generation: {generation_time:.2f}s)")
+    
+    def _check_llm_results(self):
+        """Check for completed LLM results and display them (runs in main thread)."""
+        while True:
+            try:
+                # Non-blocking check for results
+                result_data = self._llm_result_queue.get_nowait()
+                
+                # Extract the context data
+                query = result_data.pop('_query')
+                start_time = result_data.pop('_start_time') 
+                retrieval_time = result_data.pop('_retrieval_time')
+                thread_id = result_data.pop('_thread_id')
+                
+                # Remove completed thread from tracking
+                self._active_llm_threads.discard(thread_id)
+                
+                # Display the result
+                self._display_llm_result(result_data, query, start_time, retrieval_time)
+                
+            except Empty:
+                # No more results to process
+                break
     
     def _handle_query(self, query: str):
         """Handle a query from the UI."""
@@ -82,40 +156,60 @@ class CliInterface:
         self.logger.debug("Added boxed prompt to UI")
             
         # Phase 1: Retrieve chunks and show them immediately
-        self.ui.add_response(f"\n{Emojis.SEARCH} Searching knowledge base...", "info")
-        self.logger.info("Phase 1: Starting chunk retrieval")
+        # Show appropriate message based on chunk behavior
+        if self.rag_service.combine_chunks:
+            self.ui.add_response(f"\n{Emojis.SEARCH} Searching knowledge base and including custom chunks...", "info")
+        elif self.rag_service.ignore_custom:
+            self.ui.add_response(f"\n{Emojis.SEARCH} Searching knowledge base (ignoring custom chunks)...", "info")
+        elif self.rag_service.custom_chunks:
+            self.ui.add_response(f"\n{Emojis.CHUNKS} Using custom chunks...", "info")
+        else:
+            self.ui.add_response(f"\n{Emojis.SEARCH} Searching knowledge base...", "info")
+            
+        self.logger.info("Phase 1: Starting chunk selection")
         
-        # Retrieve chunks first
+        # Get chunks using smart selection
         retrieval_start = time.time()
         retrieval_result = self.rag_service.search_only(query)
         retrieval_time = time.time() - retrieval_start
-        self.logger.info(f"Chunk retrieval completed in {retrieval_time:.2f}s")
+        self.logger.info(f"Chunk selection completed in {retrieval_time:.2f}s (mode: {retrieval_result.get('mode', 'unknown')})")
         
         if not retrieval_result.get('success', False):
             error_msg = retrieval_result.get('error', 'Unknown error')
             self.logger.error(f"Retrieval failed: {error_msg}")
-            self.ui.add_response(f"\n{Emojis.ERROR} Error during search: {error_msg}", "error")
+            self.ui.add_response(format_error_message(f"Search operation failed: {error_msg}"), "error")
             return
         
         retrieved_docs = retrieval_result.get('retrieved_docs', [])
-        self.logger.info(f"Retrieved {len(retrieved_docs)} chunks")
+        mode = retrieval_result.get('mode', 'unknown')
+        self.logger.info(f"Selected {len(retrieved_docs)} chunks using mode: {mode}")
         
         # Update chunk counts and show retrieved chunks immediately
         if retrieved_docs:
             # Store retrieved chunks in history for later access by expand/add commands
             self.rag_service.retrieved_chunks_history.append(list(retrieved_docs))
             
+            # Update UI counts based on what was actually used
+            search_count = len(retrieval_result.get('search_results', []))
             self.ui.set_chunk_counts(
                 len(getattr(self.rag_service, 'custom_chunks', [])),
-                len(retrieved_docs)
+                search_count
             )
             self.logger.debug(f"Updated chunk counts in UI")
             
-            # Display retrieved chunks if not hidden
+            # Display chunks if not hidden
             if not self.hide_chunks:
                 self.logger.debug("Formatting and displaying chunks")
-                # Format retrieved chunks
-                chunk_text = f"\n{Emojis.CHUNKS} Retrieved chunks:"
+                
+                # Choose appropriate header based on mode
+                if mode == 'custom_only':
+                    chunk_text = f"\n{Emojis.CHUNKS} Custom chunks:"
+                elif mode == 'combine':
+                    chunk_text = f"\n{Emojis.CHUNKS} Combined chunks (custom + search):"
+                elif mode == 'search_only':
+                    chunk_text = f"\n{Emojis.CHUNKS} Search results (custom ignored):"
+                else:
+                    chunk_text = f"\n{Emojis.CHUNKS} Retrieved chunks:"
                 self.ui.add_response(chunk_text, "chunks_header")
                 
                 # Format all chunks in a box
@@ -174,45 +268,101 @@ class CliInterface:
         self.logger.info("Phase 2: Starting LLM generation")
         self.ui.add_response(f"\n{Emojis.ROBOT} Generating response...", "info")
         
-        # Run LLM generation in a separate thread to avoid blocking UI
+        # Create thread-safe LLM generation function
         def generate_llm_response():
-            generation_start = time.time()
-            generation_result = self.rag_service.generate_response(query, retrieved_docs)
-            generation_time = time.time() - generation_start
-            self.logger.info(f"LLM generation completed in {generation_time:.2f}s")
-            
-            # Display the response in a box
-            if generation_result.get('success', False):
-                self.logger.debug("Formatting and displaying LLM response")
-                # Format the model name nicely
-                model_name = self.rag_service.llm_model.capitalize()
-                response_header = f"\n{Emojis.ROBOT} {model_name}:"
-                self.ui.add_response(response_header, "response_header")
+            """Generate LLM response in background thread and queue result."""
+            thread_id = threading.get_ident()
+            try:
+                self.logger.info(f"LLM thread {thread_id} starting generation")
+                generation_result = self.rag_service.generate_response(query)
+                self.logger.info(f"LLM thread {thread_id} completed generation")
                 
-                # Box the response
-                boxed_response = get_wrapped_text_in_box(
-                    generation_result['answer'],
-                    box_width,
-                    "",
-                    border_style="solid"
-                )
+                # Add context data for main thread
+                generation_result['_query'] = query
+                generation_result['_start_time'] = start_time
+                generation_result['_retrieval_time'] = retrieval_time
+                generation_result['_thread_id'] = thread_id
                 
-                # Add the boxed response
-                self.ui.add_response(boxed_response, "response")
-                self.logger.debug("LLM response displayed")
-            else:
-                # Handle error case
-                error_msg = generation_result.get('error', 'Unknown error')
-                self.logger.error(f"LLM generation failed: {error_msg}")
-                self.ui.add_response(f"\n{Emojis.ERROR} Error generating response: {error_msg}", "error")
-            
-            total_time = time.time() - start_time
-            self.logger.info(f"Complete query handling finished in {total_time:.2f}s "
-                             f"(retrieval: {retrieval_time:.2f}s, generation: {generation_time:.2f}s)")
+                # Thread-safe: Put result in queue for main thread to process
+                self._llm_result_queue.put(generation_result)
+                
+            except Exception as e:
+                # Handle unexpected errors
+                self.logger.error(f"LLM thread {thread_id} failed: {str(e)}")
+                error_result = {
+                    'success': False,
+                    'error': str(e),
+                    'generation_time': 0,
+                    '_query': query,
+                    '_start_time': start_time,
+                    '_retrieval_time': retrieval_time,
+                    '_thread_id': thread_id
+                }
+                self._llm_result_queue.put(error_result)
+            finally:
+                # Clean up thread tracking
+                self._active_llm_threads.discard(thread_id)
         
         # Start the LLM generation in a background thread
         generation_thread = threading.Thread(target=generate_llm_response, daemon=True)
         generation_thread.start()
+        
+        # Track the thread (ident is available after start())
+        thread_id = generation_thread.ident
+        if thread_id:
+            self._active_llm_threads.add(thread_id)
+        
+        # Schedule periodic checks for LLM results (main thread only)
+        self._schedule_result_checks()
+    
+    def _schedule_result_checks(self):
+        """Schedule periodic checks for LLM results in the main thread."""
+        def check_and_reschedule():
+            # Check for any completed LLM results
+            self._check_llm_results()
+            
+            # If there are still active threads, schedule another check
+            if self._active_llm_threads and not self._shutdown_event.is_set():
+                # Schedule next check in 100ms using prompt_toolkit's call_later
+                try:
+                    # Try to get the event loop from the application
+                    loop = self.ui.app.loop
+                    if loop and not loop.is_closed():
+                        loop.call_later(LLM_RESULT_CHECK_INTERVAL, check_and_reschedule)
+                    else:
+                        # Fallback: Use app invalidate to trigger refresh
+                        self.ui.app.invalidate()
+                        # Manual scheduling with threading timer as fallback
+                        timer = threading.Timer(LLM_RESULT_CHECK_INTERVAL, check_and_reschedule)
+                        timer.daemon = True
+                        timer.start()
+                except Exception as e:
+                    self.logger.debug(f"Fallback scheduling due to: {e}")
+                    # Fallback: Use threading timer
+                    timer = threading.Timer(LLM_RESULT_CHECK_INTERVAL, check_and_reschedule)
+                    timer.daemon = True
+                    timer.start()
+        
+        # Start the checking cycle if we have active threads
+        if self._active_llm_threads:
+            check_and_reschedule()
+    
+    def shutdown(self):
+        """Clean shutdown of the CLI interface."""
+        self.logger.info("Shutting down CLI interface")
+        self._shutdown_event.set()
+        
+        # Wait for active threads to complete (with timeout)
+        max_wait = THREAD_SHUTDOWN_TIMEOUT  # seconds timeout
+        start_wait = time.time()
+        
+        while self._active_llm_threads and (time.time() - start_wait) < max_wait:
+            time.sleep(LLM_RESULT_CHECK_INTERVAL)
+            # Process any final results
+            self._check_llm_results()
+        
+        if self._active_llm_threads:
+            self.logger.warning(f"Timeout waiting for {len(self._active_llm_threads)} LLM threads to complete")
     
     def _handle_command(self, cmd_text: str):
         """Handle a command from the UI."""
@@ -255,347 +405,29 @@ class CliInterface:
             self._process_command(command, cmd_text)
         else:
             # Not a recognized command
-            self.ui.add_response(f"Unknown command: '{cmd_text.strip()}'", "error")
+            self.ui.add_response(format_error_message(f"Unknown command: '{cmd_text.strip()}'"), "error")
     
     def _process_command(self, command, cmd_text: str):
-        """Process a parsed command."""
-        # Handle different command types
+        """Process a parsed command using handler registry with fallback."""
         command_type = command.__class__.__name__
         
-        match command_type:
-            case "HistoryCommand":
-                # Format and display history
-                if not self.rag_service.conversation_history:
-                    self.ui.add_response(f"\n{Emojis.INFO} No conversation history yet.", "info")
-                    return
-                    
-                # Add the header
-                self.ui.add_response(f"\n{Emojis.HISTORY} Conversation History:", "info")
-                
-                # Get the terminal width
-                box_width = self.ui.app.output.get_size().columns - 2
-                
-                # Format each turn in history
-                for i, (prompt, response) in enumerate(self.rag_service.conversation_history, 1):
-                    # Add turn header
-                    self.ui.add_response(f"\n--- Turn {i} ---", "info")
-                    
-                    # Format and display the prompt
-                    prompt_header = f"{Emojis.USER} Prompt:"
-                    boxed_prompt = get_wrapped_text_in_box(
-                        prompt,
-                        box_width,
-                        prompt_header,
-                        border_style="solid"
-                    )
-                    self.ui.add_response(boxed_prompt, "prompt")
-                    
-                    # Format and display the response
-                    model_name = self.rag_service.llm_model.capitalize()
-                    response_header = f"{Emojis.ROBOT} {model_name}:"
-                    boxed_response = get_wrapped_text_in_box(
-                        response,
-                        box_width,
-                        response_header,
-                        border_style="solid"
-                    )
-                    self.ui.add_response(boxed_response, "response")
-                    
-                    # Add separator between turns if not the last one
-                    if i < len(self.rag_service.conversation_history):
-                        self.ui.add_response("\n" + "-" * box_width, "info")
-            
-            case "ClearCommand":
-                # Clear history
-                self.rag_service.clear_history(preserve_custom_chunks=False)
-                self.ui.add_response("All history and custom chunks cleared!", "info")
-                self.ui.set_chunk_counts(0, 0)
-                
-            case "ClearHistoryCommand":
-                # Clear only conversation history
-                self.rag_service.clear_history(preserve_custom_chunks=True)
-                self.ui.add_response("Conversation history cleared!", "info")
-                
-            case "ClearChunksCommand":
-                # Clear only custom chunks
-                result = self.rag_service.clear_custom_chunks()
-                self.ui.add_response("Custom chunks cleared!", "info")
-                self.ui.set_chunk_counts(0, self.ui.state.retrieved_chunks_count)
-                
-            case "SaveCommand":
-                # Save history
-                if not self.rag_service.conversation_history:
-                    self.ui.add_response("No conversation history to save yet.", "warning")
-                else:
-                    result = self.rag_service.save_history()
-                    if result['success']:
-                        self.ui.add_response(f"Conversation history saved to {result['filepath']}", "info")
-                    else:
-                        self.ui.add_response(f"Error saving conversation history: "
-                                             f"{result.get('error', 'Unknown error')}", "error")
-                        
-            case "AddCommand":
-                # Add a chunk to custom chunks
-                if command.chunk_num is None:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Please specify a chunk number to add.", "error")
-                    return
-                    
-                # First check if we have recent chunks
-                if not self.rag_service.retrieved_chunks_history:
-                    self.ui.add_response(f"\n{Emojis.ERROR} No retrieved chunks available yet.", "error")
-                    return
-                    
-                # Find the most recent chunks
-                recent_chunks = None
-                for chunks in reversed(self.rag_service.retrieved_chunks_history):
-                    if chunks:
-                        recent_chunks = chunks
-                        break
-                        
-                if not recent_chunks:
-                    self.ui.add_response(f"\n{Emojis.ERROR} No chunks available from "
-                                         f"previous queries.", "error")
-                    return
-                    
-                # Check if the chunk number is valid
-                if command.chunk_num < 1 or command.chunk_num > len(recent_chunks):
-                    self.ui.add_response(f"\n{Emojis.ERROR} Invalid chunk number. "
-                                         f"Available chunks: 1-{len(recent_chunks)}", "error")
-                    return
-                    
-                # Get the chunk directly
-                chunk = recent_chunks[command.chunk_num - 1]
-                if chunk:
-                    add_result = self.rag_service.add_to_custom_chunks(chunk)
-                    if add_result['success']:
-                        # Get preview of the chunk content for display
-                        preview = chunk.page_content.strip()[:100]
-                        if len(chunk.page_content) > 100:
-                            preview += "..."
-                        
-                        # Format success message with more details
-                        self.ui.add_response(f"\n{Emojis.CHECK} Added chunk #{command.chunk_num} to your custom "
-                                             f"chunks list!", "info")
-                        self.ui.add_response(f"You now have {add_result.get('chunks_count', 1)} chunks in your "
-                                             f"personal archive.", "info")
-                        self.ui.add_response(f"\nPreview: \"{preview}\"", "info")
-                        self.ui.add_response(f"\nUse 'ap {add_result.get('chunk_num', command.chunk_num)}' to add "
-                                             f"this chunk to your prompt when needed.", "info")
-                        self.ui.add_response("Use 'lc' to list all your custom chunks.", "info")
-                        
-                        # Update chunk counts
-                        self.ui.set_chunk_counts(
-                            len(getattr(self.rag_service, 'custom_chunks', [])),
-                            self.ui.state.retrieved_chunks_count
-                        )
-                    else:
-                        self.ui.add_response(f"\n{Emojis.ERROR} Error adding chunk: "
-                                             f"{add_result.get('error', 'Unknown error')}", "error")
-                else:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error: Could not retrieve chunk for adding.", "error")
-                    
-            case "ExpandCommand":
-                # Expand a chunk with context
-                if command.chunk_num is None:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Please specify a chunk number to expand.", "error")
-                    return
-                    
-                result = self.rag_service.expand_chunk(command.chunk_num, command.context_size)
-                if result['success']:
-                    # Format header
-                    header = f"\n{Emojis.CHUNKS} Expanded chunk #{command.chunk_num}:"
-                    if result.get('source_path'):
-                        source = result.get('source_path')
-                        header += f" (from {source})"
-                    
-                    # Add header
-                    self.ui.add_response(header, "chunks_header")
-                    
-                    # Format content in a dashed box
-                    box_width = self.ui.app.output.get_size().columns - 2
-                    boxed_text = get_wrapped_text_in_box(
-                        result['expanded_context'],
-                        box_width,
-                        "",
-                        border_style="dashed"
-                    )
-                    
-                    # Add the boxed content
-                    self.ui.add_response(boxed_text, "chunk")
-                else:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error expanding chunk: "
-                                         f"{result.get('error', 'Unknown error')}", "error")
-                    
-            case "ListChunksCommand":
-                # List custom chunks
-                result = self.rag_service.get_custom_chunks()
-                
-                if result['chunks_count'] == 0:
-                    self.ui.add_response(f"\n{Emojis.INFO} No custom chunks available yet.", "info")
-                else:
-                    # Format header
-                    header = f"\n{Emojis.CHUNKS} Custom chunks ({result['chunks_count']}):"
-                    self.ui.add_response(header, "chunks_header")
-                    
-                    # Format all chunks into a single text block
-                    all_chunks_text = []
-                    for i, chunk in enumerate(result['chunks'], 1):
-                        preview = chunk.page_content.strip()[:100]
-                        if len(chunk.page_content) > 100:
-                            preview += "..."
-                        source = chunk.metadata.get("source", "Unknown source")
-                        chunk_text = f"Chunk #{i}: {preview}\nSource: {source}"
-                        all_chunks_text.append(chunk_text)
-                        
-                        # Add separator between chunks if not the last one
-                        if i < result['chunks_count']:
-                            all_chunks_text.append("-" * 40)
-                    
-                    # Format all chunks in a dashed box
-                    box_width = self.ui.app.output.get_size().columns - 2
-                    boxed_chunks = get_wrapped_text_in_box(
-                        "\n".join(all_chunks_text),
-                        box_width,
-                        "",
-                        border_style="dashed"
-                    )
-                    
-                    # Add the boxed chunks
-                    self.ui.add_response(boxed_chunks, "chunk")
-                    
-            case "AddPromptCommand":
-                # Add a custom chunk to prompt
-                if command.chunk_num is None:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Please specify a custom chunk number.", "error")
-                    return
-                    
-                result = self.rag_service.expand_custom_chunk(command.chunk_num, command.context_size)
-                if result['success']:
-                    self.ui.add_response(f"\n{Emojis.INFO} Added custom chunk #{command.chunk_num} to prompt "
-                                         f"context:", "info")
-                    
-                    # Format content in a dashed box
-                    box_width = self.ui.app.output.get_size().columns - 2
-                    boxed_text = get_wrapped_text_in_box(
-                        result['expanded_context'],
-                        box_width,
-                        "",
-                        border_style="dashed"
-                    )
-                    
-                    # Add the boxed content
-                    self.ui.add_response(boxed_text, "chunk")
-                    self.ui.add_response(f"\n{Emojis.INFO} Your next query will "
-                                         f"include this context.", "info")
-                else:
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error: "
-                                         f"{result.get('error', 'Unknown error')}", "error")
-                    
-            case "SearchCommand":
-                # Handle search command
-                if not command.query:
-                    self.ui.add_response("Please provide a search query.", "error")
-                    return
-                
-                self.ui.add_response(f"\n{Emojis.SEARCH} Searching for: {command.query}", "info")
-                
-                # Use the RAG service to perform search-only (no LLM generation)
-                result = self.rag_service.search_only(command.query)
-                
-                # Display results
-                if result.get('retrieved_docs'):
-                    # Store retrieved chunks in history for later access by expand/add commands
-                    self.rag_service.retrieved_chunks_history.append(list(result.get('retrieved_docs', [])))
-                    
-                    # Update chunk counts
-                    self.ui.set_chunk_counts(
-                        len(getattr(self.rag_service, 'custom_chunks', [])),
-                        len(result.get('retrieved_docs', []))
-                    )
-                    
-                    # Display chunks if not hidden
-                    if not self.hide_chunks:
-                        # Format retrieved chunks header
-                        self.ui.add_response(f"\n{Emojis.CHUNKS} Search results:", "chunks_header")
-                        
-                        # Get the terminal width
-                        box_width = self.ui.app.output.get_size().columns - 2
-                        
-                        # Collect all chunk information
-                        all_chunks_text = []
-                        
-                        # Format each chunk
-                        for i, doc in enumerate(result.get('retrieved_docs', []), 1):
-                            if self.full_chunks:
-                                # Full chunk details
-                                chunk_info = format_chunk_display(doc, i, True, box_width-2)
-                            else:
-                                # Simple chunk preview with formatting
-                                chunk_info = format_chunk_display(doc, i, False, box_width-2)
-                            
-                            all_chunks_text.append(chunk_info)
-                            
-                            # Add separator between chunks if not the last one
-                            if i < len(result.get('retrieved_docs', [])):
-                                all_chunks_text.append("-" * (box_width - 10))
-                        
-                        # Format all chunks in a dashed box
-                        boxed_chunks = get_wrapped_text_in_box(
-                            "\n".join(all_chunks_text),
-                            box_width,
-                            "",
-                            border_style="dashed"
-                        )
-                        
-                        # Add the boxed chunks
-                        self.ui.add_response(boxed_chunks, "chunk")
-                else:
-                    self.ui.add_response(f"\n{Emojis.WARNING} No matching chunks found.", "warning")
-                    
-            case "SetChunksCommand":
-                # Set number of chunks to retrieve
-                if command.num_chunks is None:
-                    self.ui.add_response(f"\n{Emojis.ERROR} "
-                                         f"Please specify the number of chunks to retrieve.", "error")
-                    return
-                    
-                # Call the RAG service to set the number of chunks
-                result = self.rag_service.set_chunks(command.num_chunks)
-                
-                if result['success']:
-                    # Show success message with previous and new values
-                    previous = result['previous_value']
-                    current = result['current_value']
-                    self.ui.add_response(f"\n{Emojis.CHECK} Number of chunks to retrieve changed from {previous} "
-                                         f"to {current}.", "info")
-                    self.ui.add_response(f"Use the '-sc' or '--set-chunks' command-line option to set this value "
-                                         f"when starting the application.", "info")
-                else:
-                    # Show error message
-                    self.ui.add_response(f"\n{Emojis.ERROR} Error: "
-                                         f"{result.get('error', 'Unknown error')}", "error")
-                    
-            case "GetChunksCommand":
-                # Display current chunks setting
-                num_chunks = self.rag_service.num_chunks
-                self.ui.add_response(f"\n{Emojis.CHUNKS} Current number of chunks to retrieve: "
-                                     f"{num_chunks}", "info")
-                self.ui.add_response(f"Use 'sc <number>' to change this setting.", "info")
-                self.ui.add_response(f"Use the '-sc' or '--set-chunks' command-line option to set this value when "
-                                     f"starting the application.", "info")
-                
-            case "PromptCommand":
-                # Handle prompt command
-                if not command.query:
-                    self.ui.add_response("Please provide a prompt query.", "error")
-                    return
-                    
-                # Call the _handle_query method with the prompt text
-                self._handle_query(command.query)
-                
-            case _:
-                # Handle unknown command type
-                self.ui.add_response(f"\n{Emojis.ERROR} Unknown command type: {command_type}", "error")
+        # Try new handler system first
+        handler = self.command_registry.get_handler(command_type)
+        if handler:
+            try:
+                self.logger.debug(f"Using new handler for command: {command_type}")
+                result = handler.handle(command, self)
+                if not result.success:
+                    self.ui.add_response(format_error_message(result.message), "error")
+                return
+            except Exception as e:
+                self.logger.error(f"Handler failed for {command_type}: {str(e)}")
+                self.ui.add_response(format_error_message(f"Command handler failed: {str(e)}"), "error")
+                return
+        
+        # All commands have been migrated to handlers
+        self.logger.warning(f"No handler found for command type: {command_type}")
+        self.ui.add_response(format_error_message(f"No handler available for command: {command_type}"), "error")
     
     def interactive_session(self, hide_chunks: bool = False, full_chunks: bool = False, auto_save: bool = False):
         """Run an interactive CLI session."""
@@ -625,16 +457,12 @@ class CliInterface:
                 0  # No chunks retrieved initially
             )
 
-            if self.rag_service.vectorstore:
-                self.ui.add_response(f"\n{Emojis.CHECK} Vector database loaded successfully from:"
-                                     f" {self.rag_service.db_path}", "info")
-                if hasattr(self.rag_service, 'db_info') and self.rag_service.db_info:
-                    self.ui.add_response(f"\n{Emojis.INFO} Auto-detected embedding model: "
-                                         f"{self.rag_service.embedding_model}", "info")
-            else:
-                self.ui.add_response("Error loading vector database.", "error")
-                self.ui.add_response("Please check the path and try again.", "info")
-                return
+            # If we reach here, the vector store loaded successfully (or would have thrown an exception)
+            self.ui.add_response(f"\n{Emojis.CHECK} Vector database loaded successfully from:"
+                                 f" {self.rag_service.db_path}", "info")
+            if hasattr(self.rag_service, 'db_info') and self.rag_service.db_info:
+                self.ui.add_response(f"\n{Emojis.INFO} Auto-detected embedding model: "
+                                     f"{self.rag_service.embedding_model}", "info")
         except Exception as e:
             print(f"Error during UI startup: {str(e)}")
             # If the UI failed to create properly, handle gracefully
@@ -654,16 +482,13 @@ class CliInterface:
         try:
             self.ui.run()
             
-            # Handle auto-save if enabled when exiting
-            if auto_save and self.rag_service.conversation_history:
-                result = self.rag_service.save_history()
-                if result['success']:
-                    print(f"\nConversation history saved to {result['filepath']}")
-                else:
-                    print(f"\nError saving conversation history: {result.get('error', 'Unknown error')}")
-                    
         except KeyboardInterrupt:
-            # Handle auto-save on keyboard interrupt
+            print("\nGoodbye!")
+        finally:
+            # Clean shutdown - wait for LLM threads to complete
+            self.shutdown()
+            
+            # Handle auto-save after shutdown
             if auto_save and self.rag_service.conversation_history:
                 try:
                     result = self.rag_service.save_history()
@@ -673,5 +498,3 @@ class CliInterface:
                         print(f"\nError saving conversation history: {result.get('error', 'Unknown error')}")
                 except Exception as e:
                     print(f"\nError saving conversation history: {str(e)}")
-                    
-            print("\nGoodbye!")

@@ -154,6 +154,15 @@ MODES:
     🔧 Command Mode: Enter commands to manage chunks and sessions
     🔍 Search Mode: Directly search the vector database for content
 
+CHUNK BEHAVIOR MODES:
+    Default Smart Behavior (no flags):
+        • When you have custom chunks: Uses only custom chunks (no search)
+        • When you have no custom chunks: Performs normal vector search
+        
+    Command Line Flags:
+        • --ignore-custom (-i): Always search, ignore custom chunks
+        • --combine-chunks: Search AND include custom chunks together
+
 COMMANDS:
     exit, quit, q: Exit the application
     help: View this help message
@@ -167,7 +176,7 @@ COMMANDS:
     save: Save conversation history and custom chunks to a file
     
     CHUNK MANAGEMENT:
-    add N, a N: Add chunk #N to your custom chunks list
+    add N [N2 N3...], a N [N2 N3...]: Add chunk(s) to your custom chunks list
     lc, list-chunks: Display your custom chunks list
     expand N [size], e N [size]: Expand chunk #N with optional context size
     set-chunks N, sc N: Set number of chunks to retrieve
@@ -180,3 +189,40 @@ COMMANDS:
     SEARCH:
     s [query], search [query]: Search vector database for chunks
 """
+
+
+# Standardized Message Formatting Functions
+def format_error_message(message: str) -> str:
+    """Format an error message with consistent emoji and structure.
+    
+    Args:
+        message: The error message content
+        
+    Returns:
+        Formatted error message string
+    """
+    return f"\n{Emojis.ERROR} {message}"
+
+
+def format_warning_message(message: str) -> str:
+    """Format a warning message with consistent emoji and structure.
+    
+    Args:
+        message: The warning message content
+        
+    Returns:
+        Formatted warning message string
+    """
+    return f"\n{Emojis.WARNING} {message}"
+
+
+def format_info_message(message: str) -> str:
+    """Format an info message with consistent emoji and structure.
+    
+    Args:
+        message: The info message content
+        
+    Returns:
+        Formatted info message string
+    """
+    return f"\n{Emojis.INFO} {message}"

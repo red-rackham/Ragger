@@ -3,7 +3,6 @@ Centralized logging configuration for Ragger.
 Ensures all logging goes to files and never to stdout/stderr to avoid breaking the CLI UI.
 """
 import logging
-import os
 from pathlib import Path
 
 
@@ -13,9 +12,9 @@ def setup_logging(verbose: bool = False):
     Args:
         verbose: Enable debug level logging if True
     """
-    # Ensure logs directory exists
-    logs_dir = Path("logs")
-    logs_dir.mkdir(exist_ok=True)
+    # Use ~/.ragger/logs directory for application logs
+    logs_dir = Path.home() / ".ragger" / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     
     # Clear any existing handlers to avoid stdout/stderr leakage
     for handler in logging.root.handlers[:]:
@@ -25,7 +24,8 @@ def setup_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
     
     # Create file handler
-    file_handler = logging.FileHandler('logs/ragger.log')
+    log_file = logs_dir / "ragger.log"
+    file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(level)
     
     # Create formatter
@@ -61,7 +61,10 @@ def get_logger(name: str) -> logging.Logger:
     
     # If no handlers are set, add the file handler
     if not logger.handlers:
-        file_handler = logging.FileHandler('logs/ragger.log')
+        logs_dir = Path.home() / ".ragger" / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_file = logs_dir / "ragger.log"
+        file_handler = logging.FileHandler(log_file)
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )

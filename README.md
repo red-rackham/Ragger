@@ -54,6 +54,42 @@ pip install -e .
 
 Chunks are the building blocks of RAG. Here's how to work with them in Ragger:
 
+### Chunk Behavior Modes
+
+Ragger offers intelligent chunk selection with three modes:
+
+#### **Default Smart Behavior** (Recommended)
+- **When you have custom chunks**: Uses only your saved custom chunks (no search)
+- **When you have no custom chunks**: Performs normal vector database search
+- This provides the best user experience by automatically adapting to your workflow
+
+#### **Force Search Mode** (`--ignore-custom` or `-i`)
+```bash
+ragger /path/to/vectordb --ignore-custom
+```
+- Always searches the vector database, even if you have custom chunks
+- Useful when you want fresh results regardless of your saved chunks
+
+#### **Combined Mode** (`--combine-chunks`)
+```bash
+ragger /path/to/vectordb --combine-chunks
+```
+- Searches the vector database AND includes your custom chunks
+- Provides maximum context by combining both sources
+- Custom chunks appear first, followed by unique search results
+
+**Example Usage:**
+```bash
+# Smart default behavior (recommended)
+ragger /path/to/vectordb
+
+# Always search, ignore any custom chunks
+ragger /path/to/vectordb -i
+
+# Search and include custom chunks together
+ragger /path/to/vectordb --combine-chunks
+```
+
 ### Viewing Retrieved Chunks
 
 When you enter a query, Ragger automatically retrieves relevant chunks from your vector database:
@@ -74,11 +110,12 @@ Followed by numbered chunks from your documents that match your query.
 
 You can save chunks for later use:
 
-1. **Add a chunk to your custom list**:
+1. **Add chunk(s) to your custom list**:
    ```
    🔧 add 2
+   🔧 add 2 3 5
    ```
-   This adds chunk #2 from the most recent search results to your personal archive.
+   This adds chunk #2 from the most recent search results, or multiple chunks #2, #3, and #5 to your personal archive.
 
 2. **List your saved chunks**:
    ```
@@ -133,6 +170,8 @@ Searching is a core functionality of Ragger:
 | `-e, --embedding-model` | HuggingFace embedding model to use (auto-detected if available) |
 | `-l, --llm-model` | Ollama LLM model to use (optional for search-only mode) |
 | `-sc, --set-chunks` | Number of chunks to retrieve (default: 5) |
+| `-i, --ignore-custom` | Always search vector database, ignore custom chunks |
+| `--combine-chunks` | Search vector database AND include custom chunks |
 | `-d, --hide-chunks` | Hide the retrieved text chunks |
 | `-f, --full-chunks` | Show full chunk content and all metadata |
 | `-s, --save` | Save conversation history to file when exiting |
@@ -141,7 +180,7 @@ Searching is a core functionality of Ragger:
 ## Commands Reference
 
 ### RAG Commands
-- `a N, add N`: Add chunk #N to your custom chunks list
+- `a N [N2 N3...], add N [N2 N3...]`: Add chunk(s) to your custom chunks list
 - `e N [size], expand N [size]`: Expand chunk #N with optional context size
 - `ap N, add-prompt N`: Add custom chunk #N to your prompt
 - `s [query], search [query]`: Search vector database for chunks

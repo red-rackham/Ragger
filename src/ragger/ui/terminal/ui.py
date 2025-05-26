@@ -7,22 +7,27 @@ user interface using prompt_toolkit.
 from typing import Callable
 
 from prompt_toolkit import Application
-from prompt_toolkit.styles import Style
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.styles import Style
 from prompt_toolkit.document import Document
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.completion import DynamicCompleter
-from prompt_toolkit.filters import has_focus, Condition
+from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.layout import Layout, Window, HSplit, VSplit, FormattedTextControl, BufferControl
+from prompt_toolkit.layout import BufferControl, FormattedTextControl, HSplit, Layout, VSplit, Window
 
 from ragger.ui.terminal.mode import InputMode
 from ragger.ui.terminal.app_state import AppState
-from ragger.ui.resources import Emojis, UIColors, HELP_TEXT
-
 from ragger.core.completer import CommandCompleter
+from ragger.utils.logging_config import get_logger
+from ragger.ui.resources import HELP_TEXT, Emojis, UIColors
+from ragger.config import (UI_COMPLETION_MENU_MAX_HEIGHT,
+                           UI_INPUT_WINDOW_HEIGHT, UI_MAX_COMPLETIONS,
+                           UI_MAX_NAVIGATION_ITERATIONS,
+                           UI_MIN_REDRAW_INTERVAL, UI_MODE_INDICATOR_WIDTH,
+                           UI_SCROLL_STEP_LARGE, UI_SCROLL_STEP_SMALL)
 
 
 class RaggerUI:
@@ -36,6 +41,7 @@ class RaggerUI:
             on_command: Callback for handling commands
             debug_mode: Enable debug messages for easier troubleshooting
         """
+        self.logger = get_logger(__name__)
         # Initialize application state
         self.state = AppState(on_query, on_command)
 
@@ -98,7 +104,7 @@ class RaggerUI:
             return self.state.current_mode == InputMode.COMMAND
 
         # Set completer max completions
-        self.command_completer.max_completions = 10
+        self.command_completer.max_completions = UI_MAX_COMPLETIONS
 
         # Create input buffer with completer
         self.input_buffer = Buffer(
@@ -267,8 +273,8 @@ class RaggerUI:
                     self.input_buffer.text = self.state.get_current_buffer_content()
 
         # Scroll step sizes
-        self.scroll_step_small = 5
-        self.scroll_step_large = 40
+        self.scroll_step_small = UI_SCROLL_STEP_SMALL
+        self.scroll_step_large = UI_SCROLL_STEP_LARGE
 
         @self.kb.add('s-up')
         def _(event):
@@ -302,11 +308,11 @@ class RaggerUI:
 
         @self.kb.add('home')
         def _(event):
-            """Jump max 10000 lines up.
+            """Jump max lines up.
              (avoid infinite loop instead of while)
              TODO: Refactor
              """
-            for _ in range(10000):
+            for _ in range(UI_MAX_NAVIGATION_ITERATIONS):
                 start = self._scroll_up()
                 event.app.invalidate()
                 if not start:
@@ -314,8 +320,8 @@ class RaggerUI:
 
         @self.kb.add('end')
         def _(event):
-            """Jump max 10000 lines down to the end """
-            for _ in range(10000):
+            """Jump max lines down to the end """
+            for _ in range(UI_MAX_NAVIGATION_ITERATIONS):
                 end = self._scroll_down()
                 event.app.invalidate()
                 if not end:
@@ -360,7 +366,7 @@ class RaggerUI:
         # Create input area with mode indicator
         mode_indicator = Window(
             content=FormattedTextControl(self._get_mode_indicator_text),
-            width=3,  # Just enough for the emoji and spacing
+            width=UI_MODE_INDICATOR_WIDTH,  # Just enough for the emoji and spacing
             style='class:mode-indicator',
         )
 
@@ -370,7 +376,7 @@ class RaggerUI:
                 buffer=self.input_buffer,
                 # No menu_position as we're using CompletionsMenu container
             ),
-            height=3,
+            height=UI_INPUT_WINDOW_HEIGHT,
             style='class:input-area',
             wrap_lines=True,
             dont_extend_height=False,  # Allow extension for completions
@@ -384,7 +390,7 @@ class RaggerUI:
         ])
 
         # Create completion menu with max 5 visible suggestions
-        completion_menu = CompletionsMenu(max_height=5, scroll_offset=0)
+        completion_menu = CompletionsMenu(max_height=UI_COMPLETION_MENU_MAX_HEIGHT, scroll_offset=0)
 
         # Create root container with all UI elements
         root_container = HSplit([
@@ -405,7 +411,7 @@ class RaggerUI:
             style=self.style,
             mouse_support=True,
             full_screen=True,
-            min_redraw_interval=0.05
+            min_redraw_interval=UI_MIN_REDRAW_INTERVAL
         )
 
     def _scroll_up(self) -> bool:
@@ -574,9 +580,9 @@ class RaggerUI:
             # Run the application
             self.app.run()
         finally:
-            # Print debug log after the UI closes
+            # Log debug messages after the UI closes
             if self.debug_mode and self.debug_log:
-                print("\n=== DEBUG LOG ===")
+                self.logger.debug("=== UI DEBUG LOG ===")
                 for i, entry in enumerate(self.debug_log, 1):
-                    print(f"{i}. {entry}")
-                print("==================")
+                    self.logger.debug(f"{i}. {entry}")
+                self.logger.debug("==================")

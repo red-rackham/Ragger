@@ -5,7 +5,9 @@ This module handles command recognition, parsing, and execution
 independent of the user interface.
 """
 import re
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Any, Dict, List, Optional, Tuple
+
+from ragger.config import DEFAULT_CONTEXT_SIZE
 
 
 class Command:
@@ -20,15 +22,30 @@ class Command:
 
 
 class AddCommand(Command):
-    """Command to add chunk content to the prompt."""
+    """Command to add chunk(s) to custom chunks list."""
+    
+    def __init__(self, text: str, args: List[str]):
+        super().__init__(text, args)
+        
+        # Parse chunk numbers (support multiple: a 3 4 5)
+        self.chunk_nums = []
+        for arg in args[1:]:
+            try:
+                chunk_num = int(arg)
+                self.chunk_nums.append(chunk_num)
+            except ValueError:
+                pass  # Skip non-numeric arguments
+
+
+class ExpandCommand(Command):
+    """Command to expand a chunk's context from search results."""
     
     def __init__(self, text: str, args: List[str]):
         super().__init__(text, args)
         
         # Default values
         self.chunk_num = None
-        self.context_size = 500
-        self.position = "start"
+        self.context_size = DEFAULT_CONTEXT_SIZE
         
         # Parse arguments
         if len(args) >= 2:
@@ -43,26 +60,17 @@ class AddCommand(Command):
                 self.context_size = int(args[2])
             except (ValueError, IndexError):
                 pass
-                
-        # Position (start or end)
-        for i in range(2, min(len(args), 4)):
-            if args[i].lower() == "end":
-                self.position = "end"
-                break
-            elif args[i].lower() == "start":
-                self.position = "start"
-                break
 
 
-class ExpandCommand(Command):
-    """Command to expand a chunk's context."""
+class ExpandCustomCommand(Command):
+    """Command to expand a chunk's context from custom chunks."""
     
     def __init__(self, text: str, args: List[str]):
         super().__init__(text, args)
         
         # Default values
         self.chunk_num = None
-        self.context_size = 500
+        self.context_size = DEFAULT_CONTEXT_SIZE
         
         # Parse arguments
         if len(args) >= 2:
@@ -104,25 +112,6 @@ class SaveCommand(Command):
     pass
 
 
-class ExitCommand(Command):
-    """Command to exit the application."""
-    pass
-
-
-class ToggleModeCommand(Command):
-    """Command to toggle between prompt and command modes."""
-    pass
-
-
-class HistoryUpCommand(Command):
-    """Command to navigate up in history."""
-    pass
-
-
-class HistoryDownCommand(Command):
-    """Command to navigate down in history."""
-    pass
-
 
 class SetChunksCommand(Command):
     """Command to set the number of chunks to retrieve."""
@@ -159,7 +148,7 @@ class AddPromptCommand(Command):
         
         # Default values
         self.chunk_num = None
-        self.context_size = 500
+        self.context_size = DEFAULT_CONTEXT_SIZE
         self.position = "start"
         
         # Parse arguments
@@ -247,10 +236,14 @@ class ContentProcessor:
             r'^add\s+\d+(\s+\d+)?(\s+(start|end))?$',  # add N [size] [position]
             r'^e\s+\d+(\s+\d+)?$',                     # e N [size]
             r'^expand\s+\d+(\s+\d+)?$',                # expand N [size]
+            r'^ec\s+\d+(\s+\d+)?$',                    # ec N [size]
+            r'^expand-custom\s+\d+(\s+\d+)?$',         # expand-custom N [size]
             r'^a$',                                    # just a
             r'^add$',                                  # just add
             r'^e$',                                    # just e
             r'^expand$',                               # just expand
+            r'^ec$',                                   # just ec
+            r'^expand-custom$',                        # just expand-custom
             r'^ap\s+\d+(\s+\d+)?(\s+(start|end))?$',   # ap N [size] [position]
             r'^add-prompt\s+\d+(\s+\d+)?(\s+(start|end))?$', # add-prompt N [size] [position]
             r'^lc$',                                   # list chunks
@@ -267,10 +260,6 @@ class ContentProcessor:
             r'^set-chunks\s+\d+$',                     # set-chunks N
             r'^gc$',                                   # get-chunks
             r'^get-chunks$',                           # get-chunks
-            r'^mode$',                                 # toggle mode
-            r'^tab$',                                  # toggle mode (alternative)
-            r'^up$',                                   # history up
-            r'^down$',                                 # history down
         ]
     
     def clean_commands(self, text: str) -> str:
@@ -378,6 +367,7 @@ class CommandManager:
             r'^(a|add)$': self._create_add_command,
             r'^(a|add)\s+\d+': self._create_add_command,
             r'^(e|expand)\s+\d+': self._create_expand_command,
+            r'^(ec|expand-custom)\s+\d+': self._create_expand_custom_command,
             r'^history$': self._create_history_command,
             r'^clear$': self._create_clear_command,
             r'^(ch|clear-history)$': self._create_clear_history_command,
@@ -387,11 +377,6 @@ class CommandManager:
             r'^(s|search)(\s+.+)?$': self._create_search_command,
             r'^(p|prompt)(\s+.+)?$': self._create_prompt_command,
             r'^save$': self._create_save_command,
-            r'^(exit|quit|q)$': self._create_exit_command,
-            r'^mode$': self._create_toggle_mode_command,
-            r'^tab$': self._create_toggle_mode_command,
-            r'^up$': self._create_history_up_command,
-            r'^down$': self._create_history_down_command,
             r'^(sc|set-chunks)\s+\d+': self._create_set_chunks_command,
             r'^(gc|get-chunks)$': self._create_get_chunks_command,
         }
@@ -476,6 +461,9 @@ class CommandManager:
     def _create_expand_command(self, text: str, args: List[str]) -> ExpandCommand:
         return ExpandCommand(text, args)
         
+    def _create_expand_custom_command(self, text: str, args: List[str]) -> ExpandCustomCommand:
+        return ExpandCustomCommand(text, args)
+        
     def _create_history_command(self, text: str, args: List[str]) -> HistoryCommand:
         return HistoryCommand(text, args)
         
@@ -500,17 +488,6 @@ class CommandManager:
     def _create_save_command(self, text: str, args: List[str]) -> SaveCommand:
         return SaveCommand(text, args)
         
-    def _create_exit_command(self, text: str, args: List[str]) -> ExitCommand:
-        return ExitCommand(text, args)
-        
-    def _create_toggle_mode_command(self, text: str, args: List[str]) -> ToggleModeCommand:
-        return ToggleModeCommand(text, args)
-        
-    def _create_history_up_command(self, text: str, args: List[str]) -> HistoryUpCommand:
-        return HistoryUpCommand(text, args)
-        
-    def _create_history_down_command(self, text: str, args: List[str]) -> HistoryDownCommand:
-        return HistoryDownCommand(text, args)
         
     def _create_set_chunks_command(self, text: str, args: List[str]) -> SetChunksCommand:
         return SetChunksCommand(text, args)
