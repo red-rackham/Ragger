@@ -6,16 +6,21 @@ This module contains the core RAG service that can be used by different interfac
 import json
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
+from ragger.config import CHUNK_PREVIEW_LENGTH_SHORT, DEFAULT_CONTEXT_SIZE
 from ragger.core.commands import ContentProcessor
+from ragger.core.exceptions import (EmbeddingModelError, VectorStoreError,
+                                    VectorStoreLoadError,
+                                    VectorStoreNotFoundError)
 from ragger.utils.logging_config import get_logger
 
 
 class RagService:
     """Core RAG functionality as a service."""
     
-    def __init__(self, db_path: str, embedding_model: str = None, llm_model: str = None, num_chunks: int = 5):
+    def __init__(self, db_path: str, embedding_model: str = None, llm_model: str = None, num_chunks: int = 5, 
+                 ignore_custom: bool = False, combine_chunks: bool = False):
         """Initialize the RAG service.
         
         Args:
@@ -23,10 +28,14 @@ class RagService:
             embedding_model: Name of the embedding model to use (auto-detected if None)
             llm_model: Name of the LLM model to use (None for search-only mode)
             num_chunks: Number of chunks to retrieve for each query
+            ignore_custom: Always search vector database, ignore custom chunks
+            combine_chunks: Search vector database AND include custom chunks
         """
         self.db_path = db_path
         self.llm_model = llm_model
         self.num_chunks = num_chunks
+        self.ignore_custom = ignore_custom
+        self.combine_chunks = combine_chunks
         
         # Auto-detect embedding model if not provided
         self.db_info = self.load_ragger_info()
@@ -114,16 +123,21 @@ class RagService:
         return info
     
     def load_vectorstore(self):
-        """Load the vector store from the specified path."""
+        """Load the vector store from the specified path.
+        
+        Raises:
+            VectorStoreNotFoundError: If vector store files don't exist
+            EmbeddingModelError: If embedding model fails to load
+            VectorStoreLoadError: If vector store loading fails
+        """
         from ragger.utils.langchain_utils import load_vectorstore
         
-        try:
-            self.vectorstore = load_vectorstore(self.db_path, self.embedding_model)
-            return True
-        except Exception as e:
-            # Log error
-            self.logger.error(f"Error loading vector database: {str(e)}")
-            return False
+        self.logger.info(f"Loading vector store from: {self.db_path}")
+        self.logger.info(f"Using embedding model: {self.embedding_model}")
+        
+        # Let specific exceptions bubble up - no silent failures
+        self.vectorstore = load_vectorstore(self.db_path, self.embedding_model)
+        self.logger.info("Vector store loaded successfully")
     
     def create_rag_chain(self, conversation_history=None):
         """Create a RAG chain with the specified parameters.
@@ -147,30 +161,128 @@ class RagService:
             history
         )
     
-    def search_only(self, text: str) -> Dict[str, Any]:
-        """Retrieve relevant chunks without LLM generation.
+    def _create_qa_chain(self, conversation_history=None):
+        """Create a QA chain without retrieval for pre-selected chunks."""
+        from ragger.utils.langchain_utils import create_qa_chain
+        
+        if not self.llm_model:
+            raise ValueError("No LLM model specified. Cannot create QA chain.")
+        
+        history = conversation_history or self.conversation_history
+        return create_qa_chain(self.llm_model, history)
+    
+    def _determine_chunks_for_query(self, query: str) -> Dict[str, Any]:
+        """Smart chunk selection based on available custom chunks and user preferences.
         
         Args:
-            text: Query text
+            query: The search query
             
         Returns:
-            Dictionary with retrieval results
+            Dictionary with chunk selection results including:
+            - use_custom: Whether to use custom chunks
+            - use_search: Whether to perform search
+            - chunks: List of chunks to use
+            - search_results: Retrieved chunks from search (if any)
+            - custom_chunks: Custom chunks (if any)
+            - mode: Description of the mode used
+        """
+        result = {
+            'use_custom': False,
+            'use_search': False,
+            'chunks': [],
+            'search_results': [],
+            'custom_chunks': [],
+            'mode': '',
+            'success': True,
+            'error': None
+        }
+        
+        try:
+            if self.combine_chunks:
+                # Always search AND include custom chunks
+                result['use_search'] = True
+                result['use_custom'] = bool(self.custom_chunks)
+                result['mode'] = 'combine'
+                
+                # Perform search
+                search_result = self._perform_search(query)
+                if search_result['success']:
+                    result['search_results'] = search_result['retrieved_docs']
+                else:
+                    result['success'] = False
+                    result['error'] = search_result['error']
+                    return result
+                
+                # Combine search results with custom chunks
+                result['custom_chunks'] = self.custom_chunks
+                result['chunks'] = self._combine_chunks(self.custom_chunks, result['search_results'])
+                
+            elif self.ignore_custom:
+                # Always search, ignore custom chunks
+                result['use_search'] = True
+                result['mode'] = 'search_only'
+                
+                search_result = self._perform_search(query)
+                if search_result['success']:
+                    result['search_results'] = search_result['retrieved_docs']
+                    result['chunks'] = result['search_results']
+                else:
+                    result['success'] = False
+                    result['error'] = search_result['error']
+                    return result
+                    
+            else:
+                # Default smart behavior: use custom chunks if available, otherwise search
+                if self.custom_chunks:
+                    # Use custom chunks only
+                    result['use_custom'] = True
+                    result['mode'] = 'custom_only'
+                    result['custom_chunks'] = self.custom_chunks
+                    result['chunks'] = self.custom_chunks
+                else:
+                    # No custom chunks, fall back to search
+                    result['use_search'] = True
+                    result['mode'] = 'search_fallback'
+                    
+                    search_result = self._perform_search(query)
+                    if search_result['success']:
+                        result['search_results'] = search_result['retrieved_docs']
+                        result['chunks'] = result['search_results']
+                    else:
+                        result['success'] = False
+                        result['error'] = search_result['error']
+                        return result
+                        
+        except Exception as e:
+            result['success'] = False
+            result['error'] = str(e)
+            
+        return result
+    
+    def _perform_search(self, query: str) -> Dict[str, Any]:
+        """Perform vector database search.
+        
+        Args:
+            query: Search query
+            
+        Returns:
+            Dictionary with search results
         """
         # Clean any command text from the query
-        clean_text = self.content_processor.clean_commands(text)
-        
-        # Create retriever (works without LLM model)
-        if not self.llm_model:
-            # For search-only mode, create retriever directly
-            retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.num_chunks})
-        else:
-            # Create the RAG chain to get the retriever
-            rag_chain, retriever = self.create_rag_chain()
+        clean_text = self.content_processor.clean_commands(query)
         
         start_time = time.time()
         
-        # Retrieve documents
         try:
+            # Create retriever
+            if not self.llm_model:
+                # For search-only mode, create retriever directly
+                retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.num_chunks})
+            else:
+                # Create the RAG chain to get the retriever
+                rag_chain, retriever = self.create_rag_chain()
+            
+            # Retrieve documents
             retrieved_docs = retriever.invoke(clean_text)
             retrieval_time = time.time() - start_time
             
@@ -189,16 +301,86 @@ class RagService:
                 'query': clean_text
             }
     
-    def generate_response(self, query: str, retrieved_docs, use_history: bool = True) -> Dict[str, Any]:
-        """Generate LLM response using pre-retrieved chunks.
+    def _combine_chunks(self, custom_chunks: list, retrieved_chunks: list) -> list:
+        """Combine custom and retrieved chunks, removing duplicates.
+        
+        Args:
+            custom_chunks: List of custom chunks
+            retrieved_chunks: List of retrieved chunks
+            
+        Returns:
+            Combined list with custom chunks first, then unique retrieved chunks
+        """
+        if not custom_chunks:
+            return retrieved_chunks
+        if not retrieved_chunks:
+            return custom_chunks
+            
+        # Start with custom chunks
+        combined = list(custom_chunks)
+        
+        # Add retrieved chunks that don't duplicate custom chunks
+        for retrieved_chunk in retrieved_chunks:
+            is_duplicate = False
+            for custom_chunk in custom_chunks:
+                # Check for content similarity (simple approach)
+                if (retrieved_chunk.page_content.strip() == custom_chunk.page_content.strip() or
+                    retrieved_chunk.metadata.get('source') == custom_chunk.metadata.get('source') and
+                    retrieved_chunk.metadata.get('chunk_index') == custom_chunk.metadata.get('chunk_index')):
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                combined.append(retrieved_chunk)
+                
+        return combined
+    
+    def search_only(self, text: str) -> Dict[str, Any]:
+        """Retrieve relevant chunks without LLM generation using smart chunk selection.
+        
+        Args:
+            text: Query text
+            
+        Returns:
+            Dictionary with retrieval results including mode information
+        """
+        start_time = time.time()
+        
+        # Use smart chunk selection
+        chunk_result = self._determine_chunks_for_query(text)
+        total_time = time.time() - start_time
+        
+        if not chunk_result['success']:
+            return {
+                'success': False,
+                'error': chunk_result['error'],
+                'retrieved_docs': [],
+                'retrieval_time': total_time,
+                'query': self.content_processor.clean_commands(text),
+                'mode': 'error'
+            }
+        
+        return {
+            'success': True,
+            'retrieved_docs': chunk_result['chunks'],
+            'search_results': chunk_result['search_results'],
+            'custom_chunks': chunk_result['custom_chunks'],
+            'retrieval_time': total_time,
+            'query': self.content_processor.clean_commands(text),
+            'mode': chunk_result['mode'],
+            'use_custom': chunk_result['use_custom'],
+            'use_search': chunk_result['use_search']
+        }
+    
+    def generate_response(self, query: str, use_history: bool = True) -> Dict[str, Any]:
+        """Generate LLM response using smart chunk selection.
         
         Args:
             query: Original query text
-            retrieved_docs: Previously retrieved documents
             use_history: Whether to use conversation history
             
         Returns:
-            Dictionary with generation results
+            Dictionary with generation results including chunk selection info
         """
         if not self.llm_model:
             return {
@@ -209,12 +391,25 @@ class RagService:
                 'generation_time': 0
             }
         
+        # Use smart chunk selection to get chunks
+        chunk_result = self._determine_chunks_for_query(query)
+        if not chunk_result['success']:
+            return {
+                'success': False,
+                'error': chunk_result['error'],
+                'answer': f"Error selecting chunks: {chunk_result['error']}",
+                'generation_time': 0,
+                'mode': 'error'
+            }
+        
+        retrieved_docs = chunk_result['chunks']
+        
         # Clean any command text from the query
         clean_text = self.content_processor.clean_commands(query)
         
-        # Create the RAG chain
+        # Create QA chain without retrieval
         try:
-            rag_chain, _ = self.create_rag_chain(
+            qa_chain = self._create_qa_chain(
                 self.conversation_history if use_history else None
             )
         except ValueError as e:
@@ -226,21 +421,22 @@ class RagService:
                 'generation_time': 0
             }
         
-        # Process the query with the LLM
+        # Process query with pre-selected chunks
         try:
-            # Prepare input for the chain
-            chain_input = {"input": clean_text}
+            chain_input = {
+                "input": clean_text,
+                "context": retrieved_docs
+            }
             if use_history and self.conversation_history:
                 history_text = "\n\n".join([f"User Prompt: {q}\nAssistant Response: {a}" 
                                          for q, a in self.conversation_history])
                 chain_input["history"] = history_text
             
-            # Generate response
             start_time = time.time()
-            result = rag_chain.invoke(chain_input)
+            answer = qa_chain.invoke(chain_input)
             elapsed_time = time.time() - start_time
             
-            answer = result.get("answer", "").strip()
+            answer = answer.strip() if isinstance(answer, str) else str(answer).strip()
             
             # Update history if requested
             if use_history:
@@ -250,7 +446,13 @@ class RagService:
             return {
                 'success': True,
                 'answer': answer,
-                'generation_time': elapsed_time
+                'generation_time': elapsed_time,
+                'mode': chunk_result['mode'],
+                'use_custom': chunk_result['use_custom'],
+                'use_search': chunk_result['use_search'],
+                'custom_chunks': chunk_result['custom_chunks'],
+                'search_results': chunk_result['search_results'],
+                'retrieved_docs': retrieved_docs
             }
         except Exception as e:
             error_msg = f"Error generating response: {str(e)}"
@@ -258,7 +460,8 @@ class RagService:
                 'success': False,
                 'error': str(e),
                 'answer': error_msg,
-                'generation_time': 0
+                'generation_time': 0,
+                'mode': chunk_result.get('mode', 'error')
             }
     
     def query(self, text: str, use_history: bool = True) -> Dict[str, Any]:
@@ -348,22 +551,107 @@ class RagService:
                 'answer': error_msg
             }
     
-    def expand_chunk(self, chunk_num: int, context_size: int = 500, from_custom: bool = False) -> Dict[str, Any]:
-        """Expand a chunk from the most recent query results or custom chunks.
+    def _validate_chunk_number(self, chunk_num: int, chunks: list, chunk_type: str) -> Optional[Dict[str, Any]]:
+        """Validate chunk number and return error dict if invalid.
         
         Args:
-            chunk_num: Number of the chunk to expand
-            context_size: Size of the context window
-            from_custom: Whether to expand from the custom chunks list
+            chunk_num: The chunk number to validate
+            chunks: List of chunks to validate against
+            chunk_type: Type description for error messages
+            
+        Returns:
+            Error dict if invalid, None if valid
+        """
+        if chunk_num < 1 or chunk_num > len(chunks):
+            return {
+                'success': False,
+                'error': f"Invalid chunk number. Available {chunk_type}: 1-{len(chunks)}",
+                'expanded_context': None,
+                'chunk_num': chunk_num
+            }
+        return None
+    
+    def _expand_chunk_with_source(self, chunk, chunk_num: int, context_size: int) -> Dict[str, Any]:
+        """Expand chunk with source path using terminal utilities.
+        
+        Args:
+            chunk: The chunk document to expand
+            chunk_num: Chunk number for tracking
+            context_size: Size of context window
             
         Returns:
             Dictionary with expansion results
         """
-        # Choose the appropriate source based on from_custom flag
+        source_path = chunk.metadata.get("source", None)
+        chunk_index = chunk.metadata.get("chunk_index", chunk_num)
+        
+        if not source_path:
+            # No source path - return cleaned content directly
+            cleaned_context = self.content_processor.clean_commands(chunk.page_content)
+            return {
+                'success': True,
+                'expanded_context': cleaned_context,
+                'chunk_num': chunk_num,
+                'source_path': None,
+                'chunk_index': chunk_index,
+                'cleaned_context': cleaned_context
+            }
+        
+        # Expand using source path
+        from ragger.ui.terminal import expand_chunk_context, get_terminal_width
+        try:
+            terminal_width = get_terminal_width()
+            expanded_context = expand_chunk_context(
+                chunk, source_path, chunk_index, terminal_width, context_size
+            )
+            
+            cleaned_context = self.content_processor.clean_commands(expanded_context)
+            return {
+                'success': True,
+                'expanded_context': cleaned_context,
+                'chunk_num': chunk_num,
+                'source_path': source_path,
+                'chunk_index': chunk_index,
+                'cleaned_context': cleaned_context
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'expanded_context': None,
+                'chunk_num': chunk_num
+            }
+    
+    def _update_expansion_state(self, cleaned_context: str, chunk_num: int, is_custom: bool) -> None:
+        """Update the last expanded chunk tracking state.
+        
+        Args:
+            cleaned_context: The cleaned expanded context
+            chunk_num: Chunk number being tracked
+            is_custom: Whether this is a custom chunk
+        """
+        if is_custom:
+            self.last_custom_chunk_context = cleaned_context
+            self.last_custom_chunk_num = chunk_num
+        else:
+            self.last_expanded_context = cleaned_context
+            self.last_expanded_chunk_num = chunk_num
+
+    def expand_chunk(self, chunk_num: int, context_size: int = DEFAULT_CONTEXT_SIZE, from_custom: bool = False) -> Dict[str, Any]:
+        """Expand a chunk from the most recent query results.
+        
+        Args:
+            chunk_num: Number of the chunk to expand
+            context_size: Size of the context window
+            from_custom: Whether to expand from the custom chunks list (kept for backward compatibility)
+            
+        Returns:
+            Dictionary with expansion results
+        """
+        # For backward compatibility, redirect to custom chunks if requested
         if from_custom:
             return self.expand_custom_chunk(chunk_num, context_size)
             
-        # Expand from retrieved chunks (legacy behavior)
         # Check if we have any retrieved chunks
         if not self.retrieved_chunks_history:
             return {
@@ -388,68 +676,25 @@ class RagService:
                 'chunk_num': chunk_num
             }
         
-        # Check if the chunk number is valid
-        if chunk_num < 1 or chunk_num > len(recent_chunks):
-            return {
-                'success': False,
-                'error': f"Invalid chunk number. Available chunks: 1-{len(recent_chunks)}",
-                'expanded_context': None,
-                'chunk_num': chunk_num
-            }
+        # Validate chunk number
+        validation_error = self._validate_chunk_number(chunk_num, recent_chunks, "chunks")
+        if validation_error:
+            return validation_error
         
         # Get the requested chunk
         chunk = recent_chunks[chunk_num - 1]  # Convert to 0-based index
         
-        # Get source info
-        source_path = chunk.metadata.get("source", None)
-        chunk_index = chunk.metadata.get("chunk_index", chunk_num)
+        # Expand chunk with source
+        result = self._expand_chunk_with_source(chunk, chunk_num, context_size)
+        if not result['success']:
+            return result
         
-        if not source_path:
-            # If no source path, just return the chunk content
-            cleaned_context = self.content_processor.clean_commands(chunk.page_content)
-            
-            # Update the last expanded chunk tracking
-            self.last_expanded_context = cleaned_context
-            self.last_expanded_chunk_num = chunk_num
-            
-            return {
-                'success': True,
-                'expanded_context': cleaned_context,
-                'chunk_num': chunk_num,
-                'source_path': None,
-                'chunk_index': chunk_index
-            }
+        # Update state tracking
+        self._update_expansion_state(result['cleaned_context'], chunk_num, is_custom=False)
         
-        # Get expanded context
-        from ragger.ui.terminal import expand_chunk_context, get_terminal_width
-        try:
-            terminal_width = get_terminal_width()
-            expanded_context = expand_chunk_context(
-                chunk, source_path, chunk_index, terminal_width, context_size
-            )
-            
-            # Clean any command text from the expanded context
-            cleaned_context = self.content_processor.clean_commands(expanded_context)
-            
-            # Update the last expanded chunk tracking
-            self.last_expanded_context = cleaned_context
-            self.last_expanded_chunk_num = chunk_num
-            
-            return {
-                'success': True,
-                'expanded_context': cleaned_context,
-                'chunk_num': chunk_num,
-                'source_path': source_path,
-                'chunk_index': chunk_index,
-                'from_custom': False
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'expanded_context': None,
-                'chunk_num': chunk_num
-            }
+        # Add from_custom flag and return
+        result['from_custom'] = False
+        return result
     
     def get_last_expanded_context(self) -> Optional[Dict[str, Any]]:
         """Get the last expanded context if available.
@@ -517,7 +762,7 @@ class RagService:
                 'success': True,
                 'chunks_count': len(self.custom_chunks),
                 'chunk_num': len(self.custom_chunks),  # 1-based index of the added chunk
-                'chunk_preview': chunk.page_content[:50] + "..." if len(chunk.page_content) > 50 else chunk.page_content
+                'chunk_preview': chunk.page_content[:CHUNK_PREVIEW_LENGTH_SHORT] + "..." if len(chunk.page_content) > CHUNK_PREVIEW_LENGTH_SHORT else chunk.page_content
             }
         except Exception as e:
             return {
@@ -553,7 +798,7 @@ class RagService:
             return {
                 'success': True,
                 'chunks_count': len(self.custom_chunks),
-                'removed_chunk_preview': removed_chunk.page_content[:50] + "..." if len(removed_chunk.page_content) > 50 else removed_chunk.page_content
+                'removed_chunk_preview': removed_chunk.page_content[:CHUNK_PREVIEW_LENGTH_SHORT] + "..." if len(removed_chunk.page_content) > CHUNK_PREVIEW_LENGTH_SHORT else removed_chunk.page_content
             }
         except Exception as e:
             return {
@@ -591,7 +836,7 @@ class RagService:
             'current_count': 0
         }
         
-    def expand_custom_chunk(self, chunk_num: int, context_size: int = 500) -> Dict[str, Any]:
+    def expand_custom_chunk(self, chunk_num: int, context_size: int = DEFAULT_CONTEXT_SIZE) -> Dict[str, Any]:
         """Expand a chunk from the custom chunks list.
         
         Args:
@@ -610,67 +855,23 @@ class RagService:
                 'chunk_num': chunk_num
             }
         
-        # Check if the chunk number is valid
-        if chunk_num < 1 or chunk_num > len(self.custom_chunks):
-            return {
-                'success': False,
-                'error': f"Invalid chunk number. Available custom chunks: 1-{len(self.custom_chunks)}",
-                'expanded_context': None,
-                'chunk_num': chunk_num
-            }
+        # Validate chunk number
+        validation_error = self._validate_chunk_number(chunk_num, self.custom_chunks, "custom chunks")
+        if validation_error:
+            return validation_error
         
         # Get the requested chunk (convert to 0-based index)
         chunk = self.custom_chunks[chunk_num - 1]
         
-        # Get source info
-        source_path = chunk.metadata.get("source", None)
-        chunk_index = chunk.metadata.get("chunk_index", chunk_num)
+        # Expand chunk with source
+        result = self._expand_chunk_with_source(chunk, chunk_num, context_size)
+        if not result['success']:
+            return result
         
-        if not source_path:
-            # If no source path, just return the chunk content
-            cleaned_context = self.content_processor.clean_commands(chunk.page_content)
-            
-            # Update the last expanded chunk tracking
-            self.last_custom_chunk_context = cleaned_context
-            self.last_custom_chunk_num = chunk_num
-            
-            return {
-                'success': True,
-                'expanded_context': cleaned_context,
-                'chunk_num': chunk_num,
-                'source_path': None,
-                'chunk_index': chunk_index
-            }
-            
-        # Get expanded context if source path is available
-        from ragger.ui.terminal import expand_chunk_context, get_terminal_width
-        try:
-            terminal_width = get_terminal_width()
-            expanded_context = expand_chunk_context(
-                chunk, source_path, chunk_index, terminal_width, context_size
-            )
-            
-            # Clean any command text from the expanded context
-            cleaned_context = self.content_processor.clean_commands(expanded_context)
-            
-            # Update the last expanded chunk tracking
-            self.last_custom_chunk_context = cleaned_context
-            self.last_custom_chunk_num = chunk_num
-            
-            return {
-                'success': True,
-                'expanded_context': cleaned_context,
-                'chunk_num': chunk_num,
-                'source_path': source_path,
-                'chunk_index': chunk_index
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'expanded_context': None,
-                'chunk_num': chunk_num
-            }
+        # Update state tracking
+        self._update_expansion_state(result['cleaned_context'], chunk_num, is_custom=True)
+        
+        return result
     
     def get_last_expanded_custom_chunk(self) -> Optional[Dict[str, Any]]:
         """Get the last expanded custom chunk context if available.

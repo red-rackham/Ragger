@@ -14,15 +14,12 @@ class CommandCompleter(Completer):
         
         # Full commands with descriptions
         self.command_list = [
-            # Exit commands
+            # Essential commands
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("q", "Exit the application"),
-            
-            # Help command
             ("help", "Show help information"),
             ("h", "Show help information"),
-            ("?", "Show help information"),
             
             # History command
             ("history", "Show conversation history"),
@@ -39,25 +36,27 @@ class CommandCompleter(Completer):
             
             # Chunk management
             ("add", "Add chunk to custom chunks"),
-            ("a", "Add chunk to custom chunks"),
+            ("a", "Add chunk to custom chunks (shortcut)"),
             ("list-chunks", "List all custom chunks"),
-            ("lc", "List all custom chunks"),
-            ("expand", "Expand a chunk with context"),
-            ("e", "Expand a chunk with context"),
+            ("lc", "List all custom chunks (shortcut)"),
+            ("expand", "Expand a chunk from search results"),
+            ("e", "Expand a chunk from search results (shortcut)"),
+            ("expand-custom", "Expand a chunk from custom chunks"),
+            ("ec", "Expand a chunk from custom chunks (shortcut)"),
             ("set-chunks", "Set number of chunks to retrieve"),
-            ("sc", "Set number of chunks to retrieve"),
+            ("sc", "Set number of chunks to retrieve (shortcut)"),
             ("get-chunks", "Display current chunks setting"),
-            ("gc", "Display current chunks setting"),
+            ("gc", "Display current chunks setting (shortcut)"),
             
             # Prompt commands
             ("add-prompt", "Add chunk to prompt"),
-            ("ap", "Add chunk to prompt"),
+            ("ap", "Add chunk to prompt (shortcut)"),
             ("prompt", "Send a prompt directly"),
-            ("p", "Send a prompt directly"),
+            ("p", "Send a prompt directly (shortcut)"),
             
             # Search commands
             ("search", "Search vector database"),
-            ("s", "Search vector database")
+            ("s", "Search vector database (shortcut)")
         ]
         
         # List of just the command names for easy lookup
