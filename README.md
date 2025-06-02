@@ -17,7 +17,7 @@ Ragger is a simple terminal-based interface for RAG (Retrieval-Augmented Generat
 
 ## Prerequisites
 
-- Python 3.12 or higher
+- Python 3.10.12 or later
 - [Ollama](https://ollama.ai) for local LLM inference (optional for search-only mode)
 - A vector database containing your documents
 - GPU support recommended for large vector databases
@@ -26,7 +26,7 @@ Ragger is a simple terminal-based interface for RAG (Retrieval-Augmented Generat
 
 ```bash
 # Clone the repository
-... (todo)
+git clone git@github.com:red-rackham/Ragger.git
 cd ragger
 
 # Install in development mode

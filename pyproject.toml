@@ -19,7 +19,7 @@ dependencies = [
     "langchain-huggingface>=0.0.2",
     "langchain-ollama>=0.0.1",
     "prompt_toolkit>=3.0.38",
-    "faiss-gpu>=1.7.1",
+    "faiss-gpu>=1.7.2",
     "numpy<2",
 ]
 
