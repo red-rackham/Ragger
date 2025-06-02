@@ -16,6 +16,17 @@ pip install -r playground/requirements-playground.txt
 
 ## 📄 Document Processing
 
+- **pdf_to_json_multi_methods.py**: Test various PDF conversion methods with vision model support.
+  ```bash
+  python pdf_to_json_multi_methods.py document.pdf [--options]
+  ```
+  Key features:
+  - Multiple OCR engines (Tesseract, RapidOCR, EasyOCR)
+  - Vision model integration via Ollama for image descriptions
+  - HTML split page output with embedded PDF images
+  - GPU acceleration and performance optimization
+  - Quality analysis and method comparison reporting
+
 - **pdf_to_accessible_markdown.py**: Creates accessible markdown by replacing images with text descriptions.
   ```bash
   python pdf_to_accessible_markdown.py input_dir [output_dir]
@@ -67,6 +78,15 @@ python markdown_to_vector.py docs/ --chunk-size 800 --chunk-overlap 100
 ## Example: Process PDFs
 
 ```bash
+# Test multiple PDF conversion methods with vision models
+python pdf_to_json_multi_methods.py document.pdf --output-format html_split_page
+
+# Test specific methods only
+python pdf_to_json_multi_methods.py document.pdf --methods standard tesseract_selective
+
+# See what methods would be tested without running
+python pdf_to_json_multi_methods.py document.pdf --dry-run
+
 # Process PDFs and create accessible markdown
 python pdf_to_accessible_markdown.py pdf_docs/ output/
 ```
