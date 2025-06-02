@@ -1,11 +1,23 @@
 # Additional dependencies for playground utilities
 # Install with: pip install -r playground/requirements-playground.txt
+#
+# System dependencies for OCR engines:
+# Ubuntu/Debian: sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu
+# macOS: brew install tesseract tesseract-lang
+# Set environment variable: export TESSDATA_PREFIX=/usr/share/tesseract-ocr/4.00/tessdata
 
 # Document processing and conversion
 docling>=2.31.0
 docling-core>=2.30.0
 docling-ibm-models>=3.4.0
 docling-parse>=4.0.0
+
+# OCR engines for comprehensive testing
+tesserocr  # Tesseract OCR Python wrapper
+# rapidocr-onnxruntime  # RapidOCR for fast OCR processing (CPU-only)
+rapidocr-onnxruntime  # RapidOCR for fast OCR processing
+onnxruntime-gpu>=1.15.0  # GPU acceleration for RapidOCR (requires compatible CUDA)
+easyocr  # EasyOCR for multi-language support
 
 # LangChain components for RAG
 langchain-community>=0.0.15
